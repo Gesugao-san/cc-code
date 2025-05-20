@@ -1,4 +1,4 @@
--- GPS Daemon for "cell tower", for our city - "The Capital".
+-- GPS Daemon for "cell tower", for our city - "The Capital". CraftOS 1.9.
 -- SMP Server: https://redd.it/1kamzcj
 -- See elso: https://tweaked.cc/guide/gps_setup.html
 -- https://www.computercraft.info/wiki/Gps_(API)
