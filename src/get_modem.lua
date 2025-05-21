@@ -6,6 +6,6 @@
 --end) }
 
 local modems = { peripheral.find("modem") }
-for _, modem in pairs(modem) do
-  modem.isWireless()
+for _, modem in pairs(modems) do
+  print(modem.isWireless())
 end
