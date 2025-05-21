@@ -5,7 +5,7 @@
 master_id = 100
 
 local modem = peripheral.find("modem") or error("No modem attached", 0)
-if not m.isOpen() then
+if not modem.isOpen() then
   rednet.open("left")
 end
 
