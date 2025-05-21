@@ -1,4 +1,7 @@
--- rm rednet-d.lua .. wget https://github.com/Gesugao-san/cc-code/raw/refs/heads/master/src/rednet-d.lua rednet-d.lua
+-- Download and install:
+-- shell.run("rm", "rednet-d.lua")
+-- shell.run("wget", "https://github.com/Gesugao-san/cc-code/raw/refs/heads/master/src/rednet-d.lua", "rednet-d.lua")
+-- shell.run("rednet-d.lua")
 master_id = 100
 
 local modem = peripheral.find("modem") or error("No modem attached", 0)
