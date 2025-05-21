@@ -1,3 +1,4 @@
+-- wget https://github.com/Gesugao-san/cc-code/raw/refs/heads/master/src/rednet-d.lua rednet-d.lua
 master_id = 100
 
 local modem = peripheral.find("modem") or error("No modem attached", 0)
