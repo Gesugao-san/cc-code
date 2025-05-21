@@ -5,7 +5,7 @@
 --  return modem.isWireless() -- Check this modem is wireless.
 --end) }
 
-local modems = { peripheral.find("monitor") }
+local modems = { peripheral.find("modem") }
 for _, modem in pairs(modem) do
   modem.isWireless()
 end
