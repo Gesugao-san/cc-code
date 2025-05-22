@@ -9,8 +9,9 @@ if not rednet.isOpen() then
   rednet.open(modem)
 end
 
+print("Rednet channel opened.")
 while true do
-  print("Rednet channel opened. Listeting from "..master_id.."...")
+  print("Listeting from "..master_id.."...")
   id, message = rednet.receive()
   if id ~= master_id then goto continue end
   if message == "hello" then
