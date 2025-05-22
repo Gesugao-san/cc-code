@@ -10,6 +10,7 @@ if not rednet.isOpen() then
 end
 
 while true do
+  print("Rednet channel opened. Listeting from "..master_id.."...")
   id, message = rednet.receive()
   if id ~= master_id then goto continue end
   if message == "hello" then
