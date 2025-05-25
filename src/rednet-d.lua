@@ -6,6 +6,9 @@ master_id = 100
 
 local modem = peripheral.find("modem") or error("No modem attached", 0)
 if not rednet.isOpen() then
+  -- This will open the modem on two channels:
+  -- one which has the same ID as the computer, and
+  -- another on the broadcast channel.
   rednet.open(modem)
 end
 
