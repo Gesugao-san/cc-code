@@ -84,7 +84,7 @@ elseif sCommand == "host" then
     end
 
     -- Open a channel
-    if sModemSide ~= "remote" the 
+    if sModemSide ~= "remote" then
       local modem = peripheral.wrap(sModemSide)
     end
     print("Opening channel on modem " .. sModemSide)
