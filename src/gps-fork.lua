@@ -50,13 +50,13 @@ elseif sCommand == "host" then
         print("Looking up at LAN...")
     end
 
-    local modem = nil
     local bWirelessModemFound = false
     local tModemNames = peripheral.getNames()
     for _, sModemName in ipairs(tModemNames) do
         if peripheral.call(sModemName, "isWireless") then
         --if modem.isWireless() then
             sModemSide = "remote"
+            local modem = peripheral.wrap(sModemName)
             print("Wireless modem found at LAN.")
             break
         end
@@ -84,7 +84,9 @@ elseif sCommand == "host" then
     end
 
     -- Open a channel
-    local modem = peripheral.wrap(sModemSide)
+    if sModemSide ~= "remote" the 
+      local modem = peripheral.wrap(sModemSide)
+    end
     print("Opening channel on modem " .. sModemSide)
     modem.open(gps.CHANNEL_GPS)
 
