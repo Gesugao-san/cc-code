@@ -6,5 +6,5 @@
 
 -- Note: Every GPSd-PC serves per dimension and works only on loaded chunks.
 
-shell.run("label", "set", "Capital-GPSd-1")
+--shell.run("label", "set", "Capital-GPSd-1")
 shell.run("gps", "host", x, y, z)
