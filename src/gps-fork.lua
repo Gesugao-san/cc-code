@@ -1,8 +1,11 @@
 -- SPDX-FileCopyrightText: 2017 Daniel Ratcliffe
 --
 -- SPDX-License-Identifier: LicenseRef-CCPL
-
--- Forked from: https://github.com/cc-tweaked/CC-Tweaked/blob/mc-1.20.x/projects/core/src/main/resources/data/computercraft/lua/rom/programs/gps.lua
+--
+-- Forked from:
+-- https://github.com/cc-tweaked/CC-Tweaked/blob/mc-1.20.x/projects/core/src/main/resources/data/computercraft/lua/rom/programs/gps.lua
+-- To:
+-- https://github.com/Gesugao-san/cc-code/edit/master/src/gps-fork.lua
 
 local function printUsage()
     local programName = arg[0] or fs.getName(shell.getRunningProgram())
@@ -33,27 +36,30 @@ elseif sCommand == "host" then
     end
 
     -- Find a modem
-    --local sModemSide = nil
-    --for _, sSide in ipairs(rs.getSides()) do
-    --    if peripheral.getType(sSide) == "modem" and peripheral.call(sSide, "isWireless") then
-    --        sModemSide = sSide
-    --        break
-    --    end
-    --end
-    --local modem = nil
-    local bWirelessModemFound = false
-    local sModemSide = { peripheral.find("modem") or error("No wireless modem connected.") }
-    for _, modem in ipairs(sModemSide) do
-        --if peripheral.call(modem, "isWireless") then
-        if modem.isWireless() then
-            bWirelessModemFound = true
+    local sModemSide = nil
+    for _, sSide in ipairs(rs.getSides()) do
+        if peripheral.getType(sSide) == "modem" and peripheral.call(sSide, "isWireless") then
+            sModemSide = sSide
+            print("Wireless modem found locally.")
             break
         end
     end
 
-    if not bWirelessModemFound then
-        error("No wireless modem found.")
-        return
+    if sModemSide == nil then
+        print("No wireless modems found locally.")
+        print("Looking up at LAN...")
+    end
+
+    local modem = nil
+    local bWirelessModemFound = false
+    local tModemNames = peripheral.getNames()
+    for _, sModemName in ipairs(tModemNames) do
+        if peripheral.call(sModemName, "isWireless") then
+        --if modem.isWireless() then
+            sModemSide = "remote"
+            print("Wireless modem found at LAN.")
+            break
+        end
     end
 
     -- Determine position
@@ -78,7 +84,7 @@ elseif sCommand == "host" then
     end
 
     -- Open a channel
-    --local modem = peripheral.wrap(sModemSide)
+    local modem = peripheral.wrap(sModemSide)
     print("Opening channel on modem " .. sModemSide)
     modem.open(gps.CHANNEL_GPS)
 
