@@ -40,16 +40,18 @@ elseif sCommand == "host" then
     --        break
     --    end
     --end
-    local sModemSide = { peripheral.find("modem") }
-    for _, monitor in ipairs(sModemSide) do
-        if peripheral.getType(sSide) == "modem" and peripheral.call(sSide, "isWireless") then
-            sModemSide = sSide
+    --local modem = nil
+    local bWirelessModemFound = false
+    local sModemSide = { peripheral.find("modem") or error("No wireless modem connected.") }
+    for _, modem in ipairs(sModemSide) do
+        if peripheral.call(sSide, "isWireless") then
+            bWirelessModemFound = true
             break
         end
     end
 
-    if sModemSide == nil then
-        print("No wireless modems found. 1 required.")
+    if not bWirelessModemFound then
+        error("No wireless modem found.")
         return
     end
 
@@ -75,7 +77,7 @@ elseif sCommand == "host" then
     end
 
     -- Open a channel
-    local modem = peripheral.wrap(sModemSide)
+    --local modem = peripheral.wrap(sModemSide)
     print("Opening channel on modem " .. sModemSide)
     modem.open(gps.CHANNEL_GPS)
 
