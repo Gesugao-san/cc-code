@@ -44,7 +44,7 @@ elseif sCommand == "host" then
     local bWirelessModemFound = false
     local sModemSide = { peripheral.find("modem") or error("No wireless modem connected.") }
     for _, modem in ipairs(sModemSide) do
-        if peripheral.call(sSide, "isWireless") then
+        if peripheral.call(modem, "isWireless") then
             bWirelessModemFound = true
             break
         end
