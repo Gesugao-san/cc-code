@@ -35,6 +35,15 @@ elseif sCommand == "host" then
         return
     end
 
+    print("Emulate? y/[n]")
+    local input = read("*")
+    if input ~= "y" then
+        local emulate = false
+        print("Standart behavior selected.")
+    else
+        local emulate = true
+    end
+
     -- Find a modem
     local sModemSide = nil
     for _, sSide in ipairs(rs.getSides()) do
@@ -106,6 +115,14 @@ elseif sCommand == "host" then
         if not nDistance then goto continue end
         -- We received a ping message on the GPS channel, send a response
         modem.transmit(sReplyChannel, gps.CHANNEL_GPS, { x, y, z })
+        if emulate then
+            modem.transmit(sReplyChannel, gps.CHANNEL_GPS, { x+5, y, z })
+            modem.transmit(sReplyChannel, gps.CHANNEL_GPS, { x-5, y, z })
+            modem.transmit(sReplyChannel, gps.CHANNEL_GPS, { x, y+5, z })
+            modem.transmit(sReplyChannel, gps.CHANNEL_GPS, { x, y-5, z })
+            modem.transmit(sReplyChannel, gps.CHANNEL_GPS, { x, y, z+5 })
+            modem.transmit(sReplyChannel, gps.CHANNEL_GPS, { x, y, z-5 })
+        end
 
         -- Print the number of requests handled
         nServed = nServed + 1
