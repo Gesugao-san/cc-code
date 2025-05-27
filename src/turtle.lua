@@ -1,6 +1,9 @@
 turtle.getFuelLevel()
 turtle.refuel()
 while true do
+  if turtle.detect() then
+    break
+  end
   -- restock main slots
   for var=12,2,-1 do
     turtle.select(var)
