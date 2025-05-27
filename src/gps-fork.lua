@@ -35,13 +35,14 @@ elseif sCommand == "host" then
         return
     end
 
+    local emulate = nil
     print("Emulate? y/[n]")
-    local input = read("*")
+    local input = read()
     if input ~= "y" then
-        local emulate = false
+        emulate = false
         print("Standart behavior selected.")
     else
-        local emulate = true
+        emulate = true
     end
 
     -- Find a modem
