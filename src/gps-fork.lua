@@ -95,22 +95,26 @@ elseif sCommand == "host" then
     local nServed = 0
     while true do
         local e, p1, p2, p3, p4, p5 = os.pullEvent("modem_message")
-        if e == "modem_message" then
-            -- We received a message from a modem
-            local sSide, sChannel, sReplyChannel, sMessage, nDistance = p1, p2, p3, p4, p5
-            if (sSide == sModemSide or sModemSide == "remote") and sChannel == gps.CHANNEL_GPS and sMessage == "PING" and nDistance then
-                -- We received a ping message on the GPS channel, send a response
-                modem.transmit(sReplyChannel, gps.CHANNEL_GPS, { x, y, z })
+        -- We received a message from a modem
+        if e ~= "modem_message" then goto continue end
+        -- Guard Clause Technique
+        -- See https://youtu.be/Zmx0Ou5TNJs
+        local sSide, sChannel, sReplyChannel, sMessage, nDistance = p1, p2, p3, p4, p5
+        if sSide ~= sModemSide and sModemSide ~= "remote" then goto continue end
+        if sChannel ~= gps.CHANNEL_GPS then goto continue end
+        if sMessage ~= "PING" then goto continue end
+        if not nDistance then goto continue end
+        -- We received a ping message on the GPS channel, send a response
+        modem.transmit(sReplyChannel, gps.CHANNEL_GPS, { x, y, z })
 
-                -- Print the number of requests handled
-                nServed = nServed + 1
-                if nServed > 1 then
-                    local _, y = term.getCursorPos()
-                    term.setCursorPos(1, y - 1)
-                end
-                print(nServed .. " GPS requests served")
-            end
+        -- Print the number of requests handled
+        nServed = nServed + 1
+        if nServed > 1 then
+            local _, y = term.getCursorPos()
+            term.setCursorPos(1, y - 1)
         end
+        print(nServed .. " GPS requests served")
+        ::continue::
     end
 else
     -- "gps somethingelse"
