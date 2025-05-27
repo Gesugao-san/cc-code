@@ -1,8 +1,6 @@
 turtle.getFuelLevel()
 turtle.refuel()
 while true do
-  select(3)
-  turtle.transferTo(1)
   for var=19,2,-1 do
     select(var)
     turtle.transferTo(2)
