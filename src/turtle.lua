@@ -6,7 +6,7 @@ while true do
     turtle.transferTo(2)
   end
   turtle.select(2)
-  for var=1,16 do
+  for var=1,15 do
     turtle.forward()
     turtle.turnRight()
     turtle.place()
