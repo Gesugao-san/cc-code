@@ -37,6 +37,8 @@ All programs are in [`src/`](./src).
 
 | Program | What it does |
 |---|---|
+| [`aepattern`](./src/aepattern.lua) | **Failed experiment.** Tried to encode AE2 patterns through an ME Bridge, but this only works with an Advanced Peripherals build from draft [PR #791](https://github.com/IntelligenceModding/AdvancedPeripherals/pull/791); the official ME Bridge has no pattern encoding. Kept for reference |
+| [`aeprobe`](./src/aeprobe.lua) | Shows which inventory slots a peripheral (e.g. an AE2 terminal) exposes to CC; watches slot changes. Usage: `aeprobe help` |
 | [`dumpmethods`](./src/dumpmethods.lua) | Saves methods of every attached peripheral (including wired network ones) to a file. Usage: `dumpmethods [output_file]` |
 | [`find-modem`](./src/find-modem.lua) | Lists attached modems and shows which are wireless |
 | [`gps-fork`](./src/gps-fork.lua) | Fork of the built-in `gps` program: finds wireless modems on the wired network too, optional emulation mode |
