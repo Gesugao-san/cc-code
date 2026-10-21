@@ -56,7 +56,7 @@ into the Minecraft window.
 **Download from GitHub** (needs HTTP enabled on the server):
 
 ```shell
-wget https://github.com/Gesugao-san/cc-code/raw/refs/heads/master/src/dumpmethods.lua dumpmethods.lua
+wget https://github.com/Gesugao-san/cc-code/raw/refs/heads/main/src/dumpmethods.lua dumpmethods.lua
 ```
 
 Replace `dumpmethods` with the program you need.

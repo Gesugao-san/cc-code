@@ -3,7 +3,7 @@
 --
 -- Download and install:
 --   rm rednet-d.lua
---   wget https://github.com/Gesugao-san/cc-code/raw/refs/heads/master/src/rednet-d.lua rednet-d.lua
+--   wget https://github.com/Gesugao-san/cc-code/raw/refs/heads/main/src/rednet-d.lua rednet-d.lua
 --   rednet-d
 -- @script rednet-d
 

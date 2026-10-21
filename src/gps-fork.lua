@@ -5,7 +5,7 @@
 -- Forked from:
 -- https://github.com/cc-tweaked/CC-Tweaked/blob/mc-1.20.x/projects/core/src/main/resources/data/computercraft/lua/rom/programs/gps.lua
 -- To:
--- https://github.com/Gesugao-san/cc-code/edit/master/src/gps-fork.lua
+-- https://github.com/Gesugao-san/cc-code/blob/main/src/gps-fork.lua
 
 local function printUsage()
     local programName = arg[0] or fs.getName(shell.getRunningProgram())
