@@ -21,7 +21,7 @@ if #tArgs < 1 then
     return
 end
 
- local sCommand = tArgs[1]
+local sCommand = tArgs[1]
 if sCommand == "locate" then
     -- "gps locate"
     -- Just locate this computer (this will print the results)
@@ -40,7 +40,7 @@ elseif sCommand == "host" then
     local input = read()
     if input ~= "y" then
         emulate = false
-        print("Standart behavior selected.")
+        print("Standard behavior selected.")
     else
         emulate = true
     end
@@ -55,22 +55,26 @@ elseif sCommand == "host" then
         end
     end
 
+    local modem = nil
     if sModemSide == nil then
         print("No wireless modems found locally.")
         print("Looking up at LAN...")
+
+        -- Only modems have isWireless(), so check the type first
+        for _, sModemName in ipairs(peripheral.getNames()) do
+            if peripheral.getType(sModemName) == "modem"
+                and peripheral.call(sModemName, "isWireless") then
+                sModemSide = "remote"
+                modem = peripheral.wrap(sModemName)
+                print("Wireless modem found at LAN.")
+                break
+            end
+        end
     end
 
-    local modem = nil
-    local bWirelessModemFound = false
-    local tModemNames = peripheral.getNames()
-    for _, sModemName in ipairs(tModemNames) do
-        if peripheral.call(sModemName, "isWireless") then
-        --if modem.isWireless() then
-            sModemSide = "remote"
-            modem = peripheral.wrap(sModemName)
-            print("Wireless modem found at LAN.")
-            break
-        end
+    if sModemSide == nil then
+        printError("No wireless modems found.")
+        return
     end
 
     -- Determine position
