@@ -41,6 +41,7 @@ All programs are in [`src/`](./src).
 | [`find-modem`](./src/find-modem.lua) | Lists attached modems and shows which are wireless |
 | [`gps-fork`](./src/gps-fork.lua) | Fork of the built-in `gps` program: finds wireless modems on the wired network too, optional emulation mode |
 | [`gps-host-d`](./src/gps-host-d.lua) | GPS "cell tower" daemon. Usage: `gps-host-d [<x> <y> <z>]` |
+| [`guard`](./src/guard.lua) | Template: crashes in plain Lua on a real machine, prints the environment in CC:Tweaked, OpenComputers or OpenComputers II. Paste at the top of a program |
 | [`rednet-d`](./src/rednet-d.lua) | Rednet daemon that runs commands sent by the master computer |
 | [`tank`](./src/tank.lua) | Moves Liquid Experience from a Create Enchantment Industry disenchanter into a fluid tank |
 | [`time-print`](./src/time-print.lua) | Shows the in-game time on a Create Display Link |
