@@ -488,15 +488,44 @@ end
 
 -- Display ----------------------------------------------------------------
 
---- Writes a line at the current cursor row, optionally colored.
+--- Suffixes for large amounts, biggest first.
+local AMOUNT_UNITS = {
+  { size = 1e9, suffix = "G" },
+  { size = 1e6, suffix = "M" },
+  { size = 1e3, suffix = "k" },
+}
+
+--- Formats a number compactly, e.g. 1537531.4 -> "1.54M".
+-- @tparam number value Number to format
+-- @treturn string Text
+local function formatAmount(value)
+  local magnitude = math.abs(value)
+  for _, unit in ipairs(AMOUNT_UNITS) do
+    if magnitude >= unit.size then
+      return string.format("%.2f%s", value / unit.size, unit.suffix)
+    end
+  end
+  return string.format("%.2f", value)
+end
+
+--- Formats a number compactly with an explicit sign.
+-- @tparam number value Number to format
+-- @treturn string Text such as "+811.47k"
+local function formatSigned(value)
+  local sign = value >= 0 and "+" or ""
+  return sign .. formatAmount(value)
+end
+
+--- Writes one screen line, cut to the terminal width so it never wraps.
 -- @tparam string text Text to write
 -- @tparam[opt] number color Text color
 local function line(text, color)
+  local width = term.getSize()
   if color and term.isColor() then
     term.setTextColor(color)
   end
   term.clearLine()
-  print(text)
+  print(text:sub(1, width))
   term.setTextColor(colors.white)
 end
 
@@ -522,8 +551,8 @@ local function modelText()
     return string.format("Model    collecting data (%d/%d samples)",
       #state.samples, CONFIG.MIN_MODEL_SAMPLES)
   end
-  return string.format("Model    +%.2f mB/t, -%.2f per burn -> %.2f",
-    model.supply, model.perBurn, model.balance)
+  return string.format("Model    %s, -%s/burn -> %.2f",
+    formatSigned(model.supply), formatAmount(model.perBurn), model.balance)
 end
 
 --- Redraws the status screen.
@@ -541,8 +570,9 @@ local function draw(snapshot)
     snapshot.fuel * 100))
   line(string.format("Burn     %.2f set, %.2f actual, %.0f max",
     snapshot.burnRate, snapshot.actualBurn, snapshot.maxBurn))
-  line(string.format("Sodium   %s mB, %s mB/t", tostring(state.stock or "?"),
-    state.slope and string.format("%+.2f", state.slope) or "?"))
+  line(string.format("Sodium   %s mB, %s mB/t",
+    state.stock and formatAmount(state.stock) or "?",
+    state.slope and formatSigned(state.slope) or "?"))
   line(modelText())
   line("Last     " .. state.lastAction)
   line(state.trip and "[S] start reactor manually" or "")
