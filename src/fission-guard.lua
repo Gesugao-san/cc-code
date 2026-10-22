@@ -25,7 +25,7 @@ local CONFIG = {
   WINDOW_SAMPLES = 60,         -- samples per measurement window (30 s)
   SETTLE_WINDOWS = 1,          -- windows ignored after a burn change
 
-  MAX_TEMPERATURE = 1000,      -- K; Mekanism starts damage at 1200 K
+  MAX_TEMPERATURE = 725,       -- deg C; Mekanism starts damage at 1200 K (927 C)
   MIN_COOLANT = 0.10,          -- reactor coolant tank, fraction
   MAX_HEATED_COOLANT = 0.95,   -- heated coolant tank, fraction
   MAX_WASTE = 0.90,            -- waste tank, fraction
@@ -49,6 +49,8 @@ local CONFIG = {
 }
 
 local TICKS_PER_SECOND = 20
+local KELVIN_OFFSET = 273.15
+local DEGREE = "\176" -- degree sign in the CC font
 
 -- Peripherals ------------------------------------------------------------
 
@@ -170,7 +172,7 @@ local function readReactor()
   return {
     formed = true,
     active = reactor.getStatus(),
-    temperature = reactor.getTemperature(),
+    temperature = reactor.getTemperature() - KELVIN_OFFSET, -- deg C
     damage = reactor.getDamagePercent(),
     coolant = fraction(reactor.getCoolant(), reactor.getCoolantCapacity()),
     heated = fraction(reactor.getHeatedCoolant(),
@@ -190,7 +192,7 @@ local SAFETY_RULES = {
   {
     isUnsafe = function(s) return s.temperature >= CONFIG.MAX_TEMPERATURE end,
     describe = function(s)
-      return string.format("temperature %.0f K", s.temperature)
+      return string.format("temperature %.0f %sC", s.temperature, DEGREE)
     end,
   },
   {
@@ -516,17 +518,82 @@ local function formatSigned(value)
   return sign .. formatAmount(value)
 end
 
---- Writes one screen line, cut to the terminal width so it never wraps.
--- @tparam string text Text to write
--- @tparam[opt] number color Text color
-local function line(text, color)
-  local width = term.getSize()
-  if color and term.isColor() then
+--- Sets the text color; plain terminals stay white.
+-- @tparam number color Color from the colors API
+local function setColor(color)
+  if term.isColor() then
     term.setTextColor(color)
   end
+end
+
+--- Writes one screen row of colored segments, cut to the terminal width.
+-- @tparam table segments Array of { text, color } pairs
+local function row(segments)
+  local width = term.getSize()
+  local _, y = term.getCursorPos()
   term.clearLine()
-  print(text:sub(1, width))
-  term.setTextColor(colors.white)
+
+  local used = 0
+  for _, segment in ipairs(segments) do
+    local text = segment[1]:sub(1, width - used)
+    setColor(segment[2] or colors.white)
+    term.write(text)
+    used = used + #text
+  end
+
+  setColor(colors.white)
+  term.setCursorPos(1, y + 1)
+end
+
+--- Label segment with a fixed width so values line up.
+-- @tparam string name Label text
+-- @treturn table Segment
+local function label(name)
+  return { string.format("%-9s", name), colors.lightGray }
+end
+
+--- Formats a fraction as a percentage.
+-- @tparam number value Fraction, 0..1
+-- @treturn string Text such as " 87%"
+local function percent(value)
+  return string.format("%3.0f%%", value * 100)
+end
+
+--- Risk colors by how close a value is to its trip limit, worst first.
+local RISK_TIERS = {
+  { from = 0.9, color = colors.red },
+  { from = 0.6, color = colors.yellow },
+}
+
+--- Fuel share treated as "almost empty" on screen (no SCRAM for it).
+local FUEL_DISPLAY_LIMIT = 0.05
+
+--- Picks a color for a risk ratio (0 = safe, 1 = at the limit).
+-- @tparam number ratio Closeness to the limit
+-- @treturn number Color
+local function riskColor(ratio)
+  for _, tier in ipairs(RISK_TIERS) do
+    if ratio >= tier.from then
+      return tier.color
+    end
+  end
+  return colors.lime
+end
+
+--- Color for a value where higher is worse (temperature, waste).
+-- @tparam number value Current value
+-- @tparam number limit Trip limit
+-- @treturn number Color
+local function highRisk(value, limit)
+  return riskColor(value / limit)
+end
+
+--- Color for a value where lower is worse (coolant, fuel).
+-- @tparam number value Current value
+-- @tparam number limit Lowest acceptable value
+-- @treturn number Color
+local function lowRisk(value, limit)
+  return riskColor(limit / math.max(value, 1e-9))
 end
 
 --- Describes the reactor state for the header.
@@ -543,39 +610,78 @@ local function headerText(snapshot)
   return "OFF", colors.yellow
 end
 
---- Describes the calibration model.
--- @treturn string Text
-local function modelText()
+--- Segments for the calibration model row.
+-- @treturn table Segments
+local function modelRow()
   local model = state.model
   if not model then
-    return string.format("Model    collecting data (%d/%d samples)",
-      #state.samples, CONFIG.MIN_MODEL_SAMPLES)
+    return { label("Model"), { string.format("collecting data (%d/%d)",
+      #state.samples, CONFIG.MIN_MODEL_SAMPLES), colors.gray } }
   end
-  return string.format("Model    %s, -%s/burn -> %.2f",
-    formatSigned(model.supply), formatAmount(model.perBurn), model.balance)
+  return {
+    label("Model"),
+    { formatSigned(model.supply), colors.lime },
+    { ", ", colors.gray },
+    { "-" .. formatAmount(model.perBurn), colors.orange },
+    { "/burn -> ", colors.gray },
+    { string.format("%.2f", model.balance), colors.cyan },
+  }
+end
+
+--- Segments for the sodium stock row.
+-- @treturn table Segments
+local function sodiumRow()
+  local slope = state.slope
+  return {
+    label("Sodium"),
+    { state.stock and formatAmount(state.stock) or "?", colors.white },
+    { " mB, ", colors.gray },
+    { slope and formatSigned(slope) or "?",
+      (slope or 0) >= 0 and colors.lime or colors.red },
+    { " mB/t", colors.gray },
+  }
 end
 
 --- Redraws the status screen.
 -- @tparam table snapshot Reactor snapshot
 local function draw(snapshot)
+  local width = term.getSize()
+  local header, headerColor = headerText(snapshot)
+  local s = snapshot
+
   term.setCursorPos(1, 1)
-  local header, color = headerText(snapshot)
-  line("Fission guard  " .. header, color)
-  line(string.format("Temp     %.0f K (max %d)", snapshot.temperature,
-    CONFIG.MAX_TEMPERATURE))
-  line(string.format("Damage   %.1f", snapshot.damage))
-  line(string.format("Coolant  %3.0f%%  Heated %3.0f%%", snapshot.coolant
-    * 100, snapshot.heated * 100))
-  line(string.format("Waste    %3.0f%%  Fuel   %3.0f%%", snapshot.waste * 100,
-    snapshot.fuel * 100))
-  line(string.format("Burn     %.2f set, %.2f actual, %.0f max",
-    snapshot.burnRate, snapshot.actualBurn, snapshot.maxBurn))
-  line(string.format("Sodium   %s mB, %s mB/t",
-    state.stock and formatAmount(state.stock) or "?",
-    state.slope and formatSigned(state.slope) or "?"))
-  line(modelText())
-  line("Last     " .. state.lastAction)
-  line(state.trip and "[S] start reactor manually" or "")
+  row({ { "FISSION GUARD", colors.lightBlue }, { " / ", colors.gray },
+    { header, headerColor } })
+  row({ { string.rep("-", width), colors.gray } })
+  row({ label("Temp"),
+    { string.format("%.0f %sC", s.temperature, DEGREE),
+      highRisk(s.temperature, CONFIG.MAX_TEMPERATURE) } })
+  row({ label("Damage"),
+    { string.format("%.1f", s.damage), s.damage > 0 and colors.red
+      or colors.lime } })
+  row({ label("Coolant"), { percent(s.coolant),
+      lowRisk(s.coolant, CONFIG.MIN_COOLANT) },
+    { "   Heated ", colors.lightGray },
+    { percent(s.heated), highRisk(s.heated, CONFIG.MAX_HEATED_COOLANT) } })
+  row({ label("Waste"), { percent(s.waste), highRisk(s.waste,
+      CONFIG.MAX_WASTE) },
+    { "   Fuel   ", colors.lightGray },
+    { percent(s.fuel), lowRisk(s.fuel, FUEL_DISPLAY_LIMIT) } })
+  row({ label("Burn"),
+    { string.format("%.2f", s.burnRate), colors.orange },
+    { " set, ", colors.gray },
+    { string.format("%.2f", s.actualBurn), colors.white },
+    { " actual, ", colors.gray },
+    { string.format("%.0f", s.maxBurn), colors.white },
+    { " max", colors.gray } })
+  row(sodiumRow())
+  row(modelRow())
+  row({ label("Last"), { state.lastAction, colors.lightGray } })
+  row({ { string.format("Trip: %.0f%sC | coolant %.0f%% | heated %.0f%% | waste %.0f%%",
+    CONFIG.MAX_TEMPERATURE, DEGREE, CONFIG.MIN_COOLANT * 100,
+    CONFIG.MAX_HEATED_COOLANT * 100, CONFIG.MAX_WASTE * 100), colors.gray } })
+  row({ { state.trip and "[S] start reactor manually" or "",
+    colors.yellow } })
 end
 
 -- Main loops -------------------------------------------------------------
@@ -592,7 +698,8 @@ local function step()
   local ok, snapshot = pcall(readReactor)
   if not ok or not snapshot.formed then
     term.setCursorPos(1, 1)
-    line("Fission guard  reactor unavailable", colors.red)
+    row({ { "FISSION GUARD", colors.lightBlue }, { " / ", colors.gray },
+      { "reactor unavailable", colors.red } })
     resetWindow()
     return
   end
