@@ -41,7 +41,7 @@ All programs are in [`src/`](./src).
 | [`aeprobe`](./src/aeprobe.lua) | Shows which inventory slots a peripheral (e.g. an AE2 terminal) exposes to CC; watches slot changes. Usage: `aeprobe help` |
 | [`dumpmethods`](./src/dumpmethods.lua) | Saves methods of every attached peripheral (including wired network ones) to a file. Usage: `dumpmethods [output_file]` |
 | [`find-modem`](./src/find-modem.lua) | Lists attached modems and shows which are wireless |
-| [`fission-guard`](./src/fission-guard.lua) | Mekanism fission reactor guard: SCRAMs on overheat, damage, low coolant or full tanks and waits for a manual start; keeps the burn rate below the sodium supply measured through an ME Bridge |
+| [`fission-guard`](./src/fission-guard.lua) | Mekanism fission reactor guard: SCRAMs on overheat, damage, low coolant or full tanks and waits for a manual start; keeps the burn rate below the sodium supply measured through an ME Bridge (never lowers it while sodium storage is full); touch monitor with SCRAM, START, AUTO/MANUAL and burn buttons |
 | [`gps-fork`](./src/gps-fork.lua) | Fork of the built-in `gps` program: finds wireless modems on the wired network too, optional emulation mode |
 | [`gps-host-d`](./src/gps-host-d.lua) | GPS "cell tower" daemon. Usage: `gps-host-d [<x> <y> <z>]` |
 | [`guard`](./src/guard.lua) | Template: crashes in plain Lua on a real machine, prints the environment in CC:Tweaked, OpenComputers or OpenComputers II. Paste at the top of a program |
