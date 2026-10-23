@@ -62,6 +62,8 @@ local CONFIG = {
   MIN_PER_BURN = 1,            -- mB of sodium per burn unit, sanity floor
 
   MONITOR_SIDE = "top",        -- preferred monitor; any monitor otherwise
+  HEARTBEAT_CHAR = "\7",       -- blinking dot in the header (CC bullet)
+  STALL_SECONDS = 5,           -- no guard step this long = red steady dot
   BURN_STEP_TINY = 0.01,       -- mB/t per press of -.01 / +.01
   BURN_STEP_SMALL = 0.1,       -- mB/t per press of -.1 / +.1
   BURN_STEP_BIG = 1,           -- mB/t per press of -1 / +1
@@ -532,6 +534,9 @@ local state = {
   overflow = false,    -- last window had sodium overflowing
   slope = nil,         -- last measured stock change, mB/t
   lastAction = "starting",
+  lastStep = nil,      -- os.clock() of the last finished guard step
+  beat = false,        -- heartbeat dot shown
+  restart = false,     -- an upgrade asks to restart
 }
 state.model = fitModel(state.samples) or validModel(calibration.model)
 
@@ -976,37 +981,28 @@ local function enabledColors(enabled, background, text)
 end
 
 --- On-screen buttons, left to right.
--- style(snapshot) returns label, background and text colors.
+-- style(snapshot) returns label, background and text colors; the label
+-- gets a space on each side when the row fits.
 local BUTTONS = {
   {
     id = "scram",
     press = manualScram,
     style = function(s)
-      return " SCRAM ", enabledColors(s.active, colors.red, colors.white)
+      return "SCRAM", enabledColors(s.active, colors.red, colors.white)
     end,
   },
   {
     id = "start",
     press = startReactor,
     style = function(s)
-      return " START ", enabledColors(not s.active, colors.lime, colors.black)
-    end,
-  },
-  {
-    id = "mode",
-    press = toggleMode,
-    style = function()
-      if state.auto then
-        return "  AUTO  ", colors.cyan, colors.black
-      end
-      return " MANUAL ", colors.orange, colors.black
+      return "START", enabledColors(not s.active, colors.lime, colors.black)
     end,
   },
   {
     id = "upgrade",
     press = upgrade,
     style = function()
-      return " UPGRADE ", enabledColors(http ~= nil, colors.purple,
+      return "UPGRADE", enabledColors(http ~= nil, colors.purple,
         colors.white)
     end,
   },
@@ -1025,22 +1021,35 @@ local function stepButton(id, text, delta)
   }
 end
 
---- Second button row: burn steps, down on the left, up on the right.
-local STEP_BUTTONS = {
-  stepButton("downBig", " -1 ", -CONFIG.BURN_STEP_BIG),
-  stepButton("downSmall", " -.1 ", -CONFIG.BURN_STEP_SMALL),
-  stepButton("downTiny", " -.01 ", -CONFIG.BURN_STEP_TINY),
-  stepButton("upTiny", " +.01 ", CONFIG.BURN_STEP_TINY),
-  stepButton("upSmall", " +.1 ", CONFIG.BURN_STEP_SMALL),
-  stepButton("upBig", " +1 ", CONFIG.BURN_STEP_BIG),
+--- Second button row: burn limit control mode, then burn steps.
+local BURN_BUTTONS = {
+  {
+    id = "mode",
+    press = toggleMode,
+    style = function()
+      if state.auto then
+        return " AUTO ", colors.cyan, colors.black
+      end
+      return "MANUAL", colors.orange, colors.black
+    end,
+  },
+  stepButton("downBig", "-1", -CONFIG.BURN_STEP_BIG),
+  stepButton("downSmall", "-.1", -CONFIG.BURN_STEP_SMALL),
+  stepButton("downTiny", "-.01", -CONFIG.BURN_STEP_TINY),
+  stepButton("upTiny", "+.01", CONFIG.BURN_STEP_TINY),
+  stepButton("upSmall", "+.1", CONFIG.BURN_STEP_SMALL),
+  stepButton("upBig", "+1", CONFIG.BURN_STEP_BIG),
 }
 
---- Button rows, top to bottom.
-local BUTTON_ROWS = { BUTTONS, STEP_BUTTONS }
+--- Button rows, top to bottom, each with an optional label in front.
+local BUTTON_ROWS = {
+  { buttons = BUTTONS },
+  { label = "BURN LMT CTRL:", buttons = BURN_BUTTONS },
+}
 
 local BUTTONS_BY_ID = {}
 for _, buttonRow in ipairs(BUTTON_ROWS) do
-  for _, button in ipairs(buttonRow) do
+  for _, button in ipairs(buttonRow.buttons) do
     BUTTONS_BY_ID[button.id] = button
   end
 end
@@ -1386,15 +1395,33 @@ local function modelCells()
   }
 end
 
+--- Heartbeat dot: blinks while guard steps run, steady red if they stall.
+-- @treturn table Segment
+local function heartbeat()
+  local stalled = os.clock() - (state.lastStep or os.clock())
+    > CONFIG.STALL_SECONDS
+  if stalled then
+    return { " " .. CONFIG.HEARTBEAT_CHAR, colors.red }
+  end
+  return { state.beat and " " .. CONFIG.HEARTBEAT_CHAR or "  ", colors.lime }
+end
+
+--- Header row: title, reactor state and the heartbeat dot.
+-- @tparam table s Reactor snapshot
+-- @treturn table Segments
+local function headerRow(s)
+  local header, headerColor = headerText(s)
+  return { { "FISSION GUARD", colors.lightBlue }, { " / ", colors.gray },
+    { header, headerColor }, heartbeat() }
+end
+
 --- Builds all status rows for a snapshot.
 -- @tparam table s Reactor snapshot
 -- @treturn table Array of rows; each row is an array of { text, color }
 local function contentRows(s)
-  local header, headerColor = headerText(s)
   local line = { { string.rep("-", 200), colors.gray } }
   local rows = {
-    { { "FISSION GUARD", colors.lightBlue }, { " / ", colors.gray },
-      { header, headerColor } },
+    headerRow(s),
     line,
     tableRow(PARAM_WIDTHS, { textCell("PARAM"), textCell("VALUE"),
       textCell("TRIP") }),
@@ -1473,10 +1500,12 @@ end
 -- @tparam table snapshot Reactor snapshot
 -- @tparam number left First column
 -- @tparam number top First row
+-- @tparam number pad Spaces on each side of the label
 -- @treturn table|nil Touch area, or nil if the button does not fit
-local function drawButton(screen, button, snapshot, left, top)
+local function drawButton(screen, button, snapshot, left, top, pad)
   local device = screen.device
-  local text, background, foreground = button.style(snapshot)
+  local label, background, foreground = button.style(snapshot)
+  local text = string.rep(" ", pad) .. label .. string.rep(" ", pad)
   local right = left + #text - 1
   if right > device.getSize() then
     return nil
@@ -1495,20 +1524,44 @@ local function drawButton(screen, button, snapshot, left, top)
     bottom = top + height - 1 }
 end
 
+--- Width of a button row with a given label padding.
+-- @tparam table buttonRow { label = string|nil, buttons = table }
+-- @tparam table snapshot Reactor snapshot
+-- @tparam number pad Spaces on each side of every button label
+-- @treturn number Characters
+local function buttonRowWidth(buttonRow, snapshot, pad)
+  local width = buttonRow.label and #buttonRow.label + 1 or 0
+  for i, button in ipairs(buttonRow.buttons) do
+    width = width + #button.style(snapshot) + 2 * pad + (i > 1 and 1 or 0)
+  end
+  return width
+end
+
 --- Draws one row of buttons and adds their touch areas to the screen.
+-- Buttons lose their side spaces if the row would not fit otherwise.
 -- @tparam table screen Screen
--- @tparam table buttons Button definitions, left to right
+-- @tparam table buttonRow { label = string|nil, buttons = table }
 -- @tparam table snapshot Reactor snapshot
 -- @tparam number top First row of the button row
-local function drawButtonRow(screen, buttons, snapshot, top)
+local function drawButtonRow(screen, buttonRow, snapshot, top)
   local device = screen.device
   for dy = 0, screen.buttonHeight - 1 do
     row(device, top + dy, {})
   end
 
+  local fits = buttonRowWidth(buttonRow, snapshot, 1) <= device.getSize()
+  local pad = fits and 1 or 0
   local left = 1
-  for _, button in ipairs(buttons) do
-    local box = drawButton(screen, button, snapshot, left, top)
+  if buttonRow.label then
+    local middle = math.floor((screen.buttonHeight - 1) / 2)
+    device.setCursorPos(1, top + middle)
+    paint(device, "setTextColor", colors.lightGray)
+    device.write(buttonRow.label)
+    left = #buttonRow.label + 2
+  end
+
+  for _, button in ipairs(buttonRow.buttons) do
+    local box = drawButton(screen, button, snapshot, left, top, pad)
     if not box then
       break
     end
@@ -1525,9 +1578,9 @@ end
 -- @tparam number top Row right after the content
 local function drawButtons(screen, snapshot, top)
   screen.boxes = {}
-  for _, buttons in ipairs(BUTTON_ROWS) do
+  for _, buttonRow in ipairs(BUTTON_ROWS) do
     row(screen.device, top, {})
-    drawButtonRow(screen, buttons, snapshot, top + 1)
+    drawButtonRow(screen, buttonRow, snapshot, top + 1)
     top = top + 1 + screen.buttonHeight
   end
 end
@@ -1693,11 +1746,33 @@ local function step()
   drawAll()
 end
 
---- Runs guard steps forever.
+--- Runs guard steps forever and marks each finished step for the
+-- heartbeat.
 local function guardLoop()
   while true do
     step()
+    state.lastStep = os.clock()
     sleep(CONFIG.LOOP_SECONDS)
+  end
+end
+
+--- Redraws only the header row on every screen.
+local function drawHeaders()
+  local snapshot = state.snapshot
+  if not snapshot then
+    return
+  end
+  for _, screen in ipairs(screens) do
+    pcall(row, screen.device, 1, headerRow(snapshot))
+  end
+end
+
+--- Toggles the heartbeat dot every second.
+local function heartbeatLoop()
+  while true do
+    sleep(1)
+    state.beat = not state.beat
+    drawHeaders()
   end
 end
 
@@ -1741,7 +1816,7 @@ resetWindow()
 term.setBackgroundColor(colors.black)
 term.clear()
 log("Guard started")
-parallel.waitForAny(guardLoop, inputLoop)
+parallel.waitForAny(guardLoop, inputLoop, heartbeatLoop)
 
 if state.restart then
   runUpgraded()
