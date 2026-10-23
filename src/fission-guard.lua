@@ -985,49 +985,6 @@ local function headerText(snapshot)
   return "OFF", colors.yellow
 end
 
---- Label segment with a fixed width so values line up.
--- @tparam string name Label text
--- @treturn table Segment
-local function label(name)
-  return { string.format("%-9s", name), colors.lightGray }
-end
-
---- Segments for the sodium stock row.
--- @treturn table Segments
-local function sodiumRow()
-  local slope = state.slope
-  local segments = {
-    label("Sodium"),
-    { state.stock and formatAmount(state.stock) or "?", colors.white },
-    { " mB, ", colors.gray },
-    { slope and formatSigned(slope) or "?",
-      (slope or 0) >= 0 and colors.lime or colors.red },
-    { " mB/t", colors.gray },
-  }
-  if state.full then
-    table.insert(segments, { "  FULL", colors.cyan })
-  end
-  return segments
-end
-
---- Segments for the calibration model row.
--- @treturn table Segments
-local function modelRow()
-  local model = state.model
-  if not model then
-    return { label("Model"), { string.format("collecting data (%d/%d)",
-      #state.samples, CONFIG.MIN_MODEL_SAMPLES), colors.gray } }
-  end
-  return {
-    label("Model"),
-    { formatSigned(model.supply), colors.lime },
-    { ", ", colors.gray },
-    { "-" .. formatAmount(model.perBurn), colors.orange },
-    { "/burn -> ", colors.gray },
-    { string.format("%.2f", model.balance), colors.cyan },
-  }
-end
-
 --- Number with a fixed count of digits; leading zeros are dimmed.
 -- @tparam number value Non-negative number, rounded to an integer
 -- @tparam number width Digits to show
@@ -1052,8 +1009,14 @@ local function paddedPercent(value, color)
   return segments
 end
 
---- Inner widths of the two status grid columns.
-local GRID_WIDTHS = { 12, 13 }
+--- A value followed by a dim unit, e.g. "9.23" + " set".
+-- @tparam string value Value text
+-- @tparam number color Value color
+-- @tparam string unit Unit text
+-- @treturn table Segments
+local function withUnit(value, color, unit)
+  return { { value, color }, { unit, colors.gray } }
+end
 
 --- Total length of the text in segments.
 -- @tparam table segments Array of { text, color }
@@ -1066,6 +1029,20 @@ local function segmentsLength(segments)
   return length
 end
 
+--- Cuts segments to a width.
+-- @tparam table segments Array of { text, color }
+-- @tparam number width Characters allowed
+-- @treturn table Segments that fit
+local function clipSegments(segments, width)
+  local result, used = {}, 0
+  for _, segment in ipairs(segments) do
+    local text = segment[1]:sub(1, width - used)
+    table.insert(result, { text, segment[2] })
+    used = used + #text
+  end
+  return result
+end
+
 --- Appends segments to a row.
 -- @tparam table target Row being built
 -- @tparam table segments Segments to add
@@ -1075,47 +1052,148 @@ local function appendSegments(target, segments)
   end
 end
 
---- One grid row: "| NAME   value | NAME   value |" with values right-aligned.
--- @tparam table cells Two { name, segments } pairs
+--- One table row: cells padded to column widths between gray pipes.
+-- Leading columns are left-aligned (names, text), the rest right-aligned.
+-- @tparam table widths Inner widths of the columns
+-- @tparam table cells Segment arrays, one per column
+-- @tparam[opt=1] number leftColumns How many columns are left-aligned
 -- @treturn table Segments
-local function gridRow(cells)
+local function tableRow(widths, cells, leftColumns)
+  leftColumns = leftColumns or 1
   local result = { { "| ", colors.gray } }
-  for i, cell in ipairs(cells) do
-    local name, value = cell[1], cell[2]
-    local gap = math.max(1, GRID_WIDTHS[i] - #name - segmentsLength(value))
-    table.insert(result, { name .. string.rep(" ", gap), colors.lightGray })
-    appendSegments(result, value)
-    table.insert(result, { i < #cells and " | " or " |", colors.gray })
+  for i, width in ipairs(widths) do
+    local cell = clipSegments(cells[i] or {}, width)
+    local gap = { string.rep(" ", width - segmentsLength(cell)) }
+    local left = i <= leftColumns
+    if not left then
+      table.insert(result, gap)
+    end
+    appendSegments(result, cell)
+    if left then
+      table.insert(result, gap)
+    end
+    table.insert(result, { i < #widths and " | " or " |", colors.gray })
   end
   return result
 end
 
---- Grid rows with coolant, fuel, heated coolant, waste, temperature, damage.
--- @tparam table s Reactor snapshot
--- @treturn table Array of three rows
-local function gridRows(s)
-  local tempColor = highRisk(s.temperature, CONFIG.MAX_TEMPERATURE)
-  local temp = padded(s.temperature, 4, tempColor)
-  table.insert(temp, { " " .. DEGREE .. "C", tempColor })
+--- Table ruler such as "|-------|---------|".
+-- @tparam table widths Inner widths of the columns
+-- @treturn table Segments
+local function tableRuler(widths)
+  local parts = {}
+  for _, width in ipairs(widths) do
+    table.insert(parts, string.rep("-", width + 2))
+  end
+  return { { "|" .. table.concat(parts, "|") .. "|", colors.gray } }
+end
 
-  local damage = {
-    { string.format("%.1f", s.damage), s.damage > 0 and colors.red
-      or colors.lime },
-    { "/100.0", colors.gray },
-  }
+--- Plain text cell.
+-- @tparam string text Text
+-- @tparam[opt] number color Color, light gray by default
+-- @treturn table Segments
+local function textCell(text, color)
+  return { { text, color or colors.lightGray } }
+end
 
+--- Column widths of the parameter table: PARAM, VALUE, TRIP.
+local PARAM_WIDTHS = { 5, 7, 7 }
+
+--- Parameter table rows: name, value cell and SCRAM limit.
+local PARAM_ROWS = {
+  {
+    name = "COOL",
+    value = function(s)
+      return paddedPercent(s.coolant,
+        depletionRisk(s.coolant, CONFIG.MIN_COOLANT))
+    end,
+    trip = function()
+      return string.format("<=%.0f%%", CONFIG.MIN_COOLANT * 100)
+    end,
+  },
+  {
+    name = "HEAT",
+    value = function(s)
+      return paddedPercent(s.heated,
+        highRisk(s.heated, CONFIG.MAX_HEATED_COOLANT))
+    end,
+    trip = function()
+      return string.format(">=%.0f%%", CONFIG.MAX_HEATED_COOLANT * 100)
+    end,
+  },
+  {
+    name = "WASTE",
+    value = function(s)
+      return paddedPercent(s.waste, highRisk(s.waste, CONFIG.MAX_WASTE))
+    end,
+    trip = function()
+      return string.format(">=%.0f%%", CONFIG.MAX_WASTE * 100)
+    end,
+  },
+  {
+    name = "TMP",
+    value = function(s)
+      local color = highRisk(s.temperature, CONFIG.MAX_TEMPERATURE)
+      local segments = padded(s.temperature, 4, color)
+      table.insert(segments, { " " .. DEGREE .. "C", color })
+      return segments
+    end,
+    trip = function()
+      return string.format(">=%.0f%sC", CONFIG.MAX_TEMPERATURE, DEGREE)
+    end,
+  },
+  {
+    name = "DMG",
+    value = function(s)
+      return textCell(string.format("%.1f", s.damage),
+        s.damage > 0 and colors.red or colors.lime)
+    end,
+    trip = function() return ">0" end,
+  },
+  {
+    name = "FUEL",
+    value = function(s)
+      return paddedPercent(s.fuel, lowRisk(s.fuel, FUEL_DISPLAY_LIMIT))
+    end,
+    trip = function() return "-" end,
+  },
+}
+
+--- Column widths of the control table: name and three values.
+local CONTROL_WIDTHS = { 5, 11, 11, 11 }
+
+--- Cells of the sodium row.
+-- @treturn table Cells
+local function sodiumCells()
+  local slope = state.slope
+  local slopeColor = (slope or 0) >= 0 and colors.lime or colors.red
   return {
-    gridRow({
-      { "COOL", paddedPercent(s.coolant,
-        depletionRisk(s.coolant, CONFIG.MIN_COOLANT)) },
-      { "FUEL", paddedPercent(s.fuel, lowRisk(s.fuel, FUEL_DISPLAY_LIMIT)) },
-    }),
-    gridRow({
-      { "HEAT", paddedPercent(s.heated,
-        highRisk(s.heated, CONFIG.MAX_HEATED_COOLANT)) },
-      { "WASTE", paddedPercent(s.waste, highRisk(s.waste, CONFIG.MAX_WASTE)) },
-    }),
-    gridRow({ { "TMP", temp }, { "DMG", damage } }),
+    textCell("NA"),
+    withUnit(state.stock and formatAmount(state.stock) or "?", colors.white,
+      " mB"),
+    withUnit(slope and formatSigned(slope) or "?", slopeColor, "/t"),
+    state.full and textCell("FULL", colors.cyan) or {},
+  }
+end
+
+--- Cells of the calibration model row.
+-- @treturn table Cells
+local function modelCells()
+  local model = state.model
+  if not model then
+    return {
+      textCell("MODEL"),
+      textCell("collecting", colors.gray),
+      textCell(string.format("%d/%d", #state.samples,
+        CONFIG.MIN_MODEL_SAMPLES), colors.gray),
+      {},
+    }
+  end
+  return {
+    textCell("MODEL"),
+    withUnit(formatSigned(model.supply), colors.lime, "/t"),
+    withUnit("-" .. formatAmount(model.perBurn), colors.orange, "/b"),
+    withUnit(string.format("%.2f", model.balance), colors.cyan, " bal"),
   }
 end
 
@@ -1124,37 +1202,43 @@ end
 -- @treturn table Array of rows; each row is an array of { text, color }
 local function contentRows(s)
   local header, headerColor = headerText(s)
-  local grid = gridRows(s)
-  return {
+  local line = { { string.rep("-", 200), colors.gray } }
+  local rows = {
     { { "FISSION GUARD", colors.lightBlue }, { " / ", colors.gray },
       { header, headerColor } },
-    { { string.rep("-", 200), colors.gray } },
-    grid[1],
-    grid[2],
-    grid[3],
-    { label("Burn"), { string.format("%.2f", s.burnRate), colors.orange },
-      { " set, ", colors.gray },
-      { string.format("%.2f", s.actualBurn), colors.white },
-      { " actual, ", colors.gray },
-      { string.format("%.0f", s.maxBurn), colors.white },
-      { " max", colors.gray } },
-    sodiumRow(),
-    modelRow(),
-    { label("Last"), { state.lastAction, colors.lightGray } },
-    { { string.format(
-      "Trip: %.0f%sC, coolant<=%.0f%%, heated>=%.0f%%, waste>=%.0f%%",
-      CONFIG.MAX_TEMPERATURE, DEGREE, CONFIG.MIN_COOLANT * 100,
-      CONFIG.MAX_HEATED_COOLANT * 100, CONFIG.MAX_WASTE * 100),
-      colors.gray } },
-    { { state.trip and "Press START or S to start manually" or "",
-      colors.yellow } },
+    line,
+    tableRow(PARAM_WIDTHS, { textCell("PARAM"), textCell("VALUE"),
+      textCell("TRIP") }),
+    tableRuler(PARAM_WIDTHS),
   }
+
+  for _, param in ipairs(PARAM_ROWS) do
+    table.insert(rows, tableRow(PARAM_WIDTHS, { textCell(param.name),
+      param.value(s), textCell(param.trip(), colors.gray) }))
+  end
+
+  local lastWidth = CONTROL_WIDTHS[2] + CONTROL_WIDTHS[3]
+    + CONTROL_WIDTHS[4] + 6
+  appendSegments(rows, {
+    line,
+    tableRow(CONTROL_WIDTHS, {
+      textCell("BURN"),
+      withUnit(string.format("%.2f", s.burnRate), colors.orange, " set"),
+      withUnit(string.format("%.2f", s.actualBurn), colors.white, " act"),
+      withUnit(string.format("%.0f", s.maxBurn), colors.white, " max"),
+    }),
+    tableRow(CONTROL_WIDTHS, sodiumCells()),
+    tableRow(CONTROL_WIDTHS, modelCells()),
+    tableRow({ CONTROL_WIDTHS[1], lastWidth }, { textCell("LAST"),
+      textCell(state.lastAction, colors.lightGray) }, 2),
+  })
+  return rows
 end
 
 -- Screens ----------------------------------------------------------------
 
 local LAYOUT_WIDTH = 51       -- widest content row
-local CONTENT_ROWS = 11       -- rows returned by contentRows
+local CONTENT_ROWS = 15       -- rows returned by contentRows
 local TOUCH_BUTTON_HEIGHT = 3 -- button height on a big enough monitor
 
 --- Rows a screen needs for content and button rows, each after a gap.
