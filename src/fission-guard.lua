@@ -65,6 +65,8 @@ local CONFIG = {
   MONITOR_SIDE = "top",        -- preferred monitor; any monitor otherwise
   HEARTBEAT_CHAR = "\7",       -- blinking dot in the header (CC bullet)
   STALL_SECONDS = 5,           -- no guard step this long = red steady dot
+  SEARCH_SECONDS = 5,          -- look for a lost reactor this long before
+                               -- reporting it unavailable
   BURN_STEP_TINY = 0.01,       -- mB/t per press of -.01 / +.01
   BURN_STEP_SMALL = 0.1,       -- mB/t per press of -.1 / +.1
   BURN_STEP_BIG = 1,           -- mB/t per press of -1 / +1
@@ -81,11 +83,21 @@ local STATE_VERSION = 3 -- bump to discard calibration saved by old versions
 local TICKS_PER_SECOND = 20
 local KELVIN_OFFSET = 273.15
 local DEGREE = "\176" -- degree sign in the CC font
+local CELSIUS = DEGREE .. "C"
 
 -- Peripherals ------------------------------------------------------------
 
-local reactor = peripheral.find("fissionReactorLogicAdapter")
-  or error("No fission reactor logic adapter found", 0)
+--- Reactor logic adapter; nil until found, searched again when lost.
+local reactor = nil
+
+--- Looks for the reactor logic adapter on this computer's network.
+-- @treturn table|nil Adapter peripheral
+local function findReactor()
+  reactor = peripheral.find("fissionReactorLogicAdapter")
+  return reactor
+end
+
+findReactor()
 local bridge = peripheral.find("me_bridge") or peripheral.find("meBridge")
   or error("No ME Bridge found", 0)
 
@@ -361,46 +373,72 @@ local function readReactor()
   }
 end
 
---- Reads the reactor without letting errors escape.
--- @treturn table|nil Snapshot of a formed reactor, or nil
-local function safeReadReactor()
+--- Reads the reactor once.
+-- @treturn table|nil Snapshot of a formed reactor
+-- @treturn string|nil Why there is no snapshot
+local function tryReadReactor()
+  if not reactor then
+    return nil, "no adapter"
+  end
+
   local ok, snapshot = pcall(readReactor)
-  if not ok or not snapshot.formed then
-    return nil
+  if not ok then
+    return nil, "no response"
+  end
+  if not snapshot.formed then
+    return nil, "not formed"
   end
   return snapshot
 end
 
 -- Safety -----------------------------------------------------------------
 
+--- SCRAM reason in the table's style, e.g. "HEAT 1.2 % >= 1 %".
+-- @tparam string name Table row name
+-- @tparam number value Current value in shown units
+-- @tparam string unit Unit text
+-- @tparam string op Comparison
+-- @tparam number limit Limit in shown units
+-- @treturn string Reason
+local function tripReason(name, value, unit, op, limit)
+  return string.format("%s %.1f %s %s %.0f %s", name, value, unit, op, limit,
+    unit)
+end
+
 --- Hazards that trigger a SCRAM, checked in order.
 local SAFETY_RULES = {
   {
     isUnsafe = function(s) return s.temperature >= CONFIG.MAX_TEMPERATURE end,
     describe = function(s)
-      return string.format("temperature %.0f %sC", s.temperature, DEGREE)
+      return tripReason("T", s.temperature, CELSIUS, ">=",
+        CONFIG.MAX_TEMPERATURE)
     end,
   },
   {
     isUnsafe = function(s) return s.damage > CONFIG.MAX_DAMAGE end,
-    describe = function(s) return string.format("damage %.1f", s.damage) end,
+    describe = function(s)
+      return tripReason("DMG", s.damage, "%", ">", CONFIG.MAX_DAMAGE)
+    end,
   },
   {
     isUnsafe = function(s) return s.coolant <= CONFIG.MIN_COOLANT end,
     describe = function(s)
-      return string.format("coolant %.1f%%", s.coolant * 100)
+      return tripReason("COOL", s.coolant * 100, "%", "<=",
+        CONFIG.MIN_COOLANT * 100)
     end,
   },
   {
     isUnsafe = function(s) return s.heated >= CONFIG.MAX_HEATED_COOLANT end,
     describe = function(s)
-      return string.format("heated coolant %.1f%%", s.heated * 100)
+      return tripReason("HEAT", s.heated * 100, "%", ">=",
+        CONFIG.MAX_HEATED_COOLANT * 100)
     end,
   },
   {
     isUnsafe = function(s) return s.waste >= CONFIG.MAX_WASTE end,
     describe = function(s)
-      return string.format("waste %.1f%%", s.waste * 100)
+      return tripReason("WASTE", s.waste * 100, "%", ">=",
+        CONFIG.MAX_WASTE * 100)
     end,
   },
 }
@@ -594,8 +632,26 @@ local state = {
   beat = false,        -- heartbeat dot lit in this blink
   showBeat = true,     -- heartbeat visible; toggled by touch, not saved
   restart = false,     -- an upgrade asks to restart
+  unavailable = nil,   -- why the reactor cannot be read
+  lostSince = nil,     -- os.clock() when the reactor was lost
 }
 state.model = fitModel(state.samples) or validModel(calibration.model)
+
+--- Reads the reactor; if that fails, searches the network for the adapter
+-- again and retries. Remembers why the reactor is unavailable.
+-- @treturn table|nil Snapshot of a formed reactor, or nil
+local function safeReadReactor()
+  local snapshot = tryReadReactor()
+  if snapshot then
+    return snapshot
+  end
+
+  findReactor()
+  local reason
+  snapshot, reason = tryReadReactor()
+  state.unavailable = reason
+  return snapshot
+end
 
 --- Starts a new measurement window.
 local function resetWindow()
@@ -887,7 +943,7 @@ local function manualScram()
   end
 
   pcall(reactor.scram)
-  state.trip = "manual SCRAM"
+  state.trip = "MANUAL SCRAM"
   state.lastAction = "manual SCRAM"
   log("SCRAM: manual")
 end
@@ -1189,18 +1245,22 @@ end
 
 -- Screen content ---------------------------------------------------------
 
---- Describes the reactor state for the header.
+local TITLE = { "FISSION GUARD", colors.lightBlue }
+local SLASH = { " / ", colors.gray }
+
+--- Header title with the reactor state:
+-- "FISSION GUARDING" while running, "/ READY" when off,
+-- "/ TRIPPED: reason" after a SCRAM.
 -- @tparam table snapshot Reactor snapshot
--- @treturn string Text
--- @treturn number Color
-local function headerText(snapshot)
+-- @treturn table Segments
+local function headerTitle(snapshot)
   if state.trip then
-    return "TRIPPED: " .. state.trip, colors.red
+    return { TITLE, SLASH, { "TRIPPED: " .. state.trip, colors.red } }
   end
   if snapshot.active then
-    return "RUNNING", colors.lime
+    return { TITLE, { "ING", colors.lime } }
   end
-  return "OFF", colors.yellow
+  return { TITLE, SLASH, { "READY", colors.yellow } }
 end
 
 --- Number with a fixed count of digits; leading zeros are dimmed.
@@ -1351,8 +1411,6 @@ local function tripCell(op, limit, unit)
     colors.gray } }, unit, colors.gray, TRIP_DIGITS))
   return cell
 end
-
-local CELSIUS = DEGREE .. "C"
 
 --- Parameter table rows. value(s) returns the number and its color;
 -- limitKey names the CONFIG trip limit, if the row has one.
@@ -1562,9 +1620,9 @@ BUTTONS_BY_ID.heartbeat = {
 -- @tparam table s Reactor snapshot
 -- @treturn table Segments
 local function headerRow(s)
-  local header, headerColor = headerText(s)
-  return { { "FISSION GUARD", colors.lightBlue }, { " / ", colors.gray },
-    { header, headerColor }, heartbeat() }
+  local segments = headerTitle(s)
+  table.insert(segments, heartbeat())
+  return segments
 end
 
 --- Builds all status rows for a snapshot.
@@ -1756,14 +1814,25 @@ local function drawStatus(screen, snapshot)
   drawButtons(screen, snapshot, CONTENT_ROWS + 1)
 end
 
---- Draws the "reactor unavailable" screen without buttons.
+--- Header while there is no reactor: SEARCHING for SEARCH_SECONDS, then
+-- UNAVAILABLE with the reason.
+-- @treturn table Segments
+local function missingHeader()
+  local lost = os.clock() - (state.lostSince or os.clock())
+  if lost < CONFIG.SEARCH_SECONDS then
+    return { TITLE, SLASH, { "SEARCHING REACTOR", colors.yellow } }
+  end
+  return { TITLE, SLASH, { "UNAVAILABLE: " .. (state.unavailable
+    or "unknown"), colors.red } }
+end
+
+--- Draws the screen shown while there is no reactor, without buttons.
 -- @tparam table screen Screen
 local function drawUnavailable(screen)
   local device = screen.device
   paint(device, "setBackgroundColor", colors.black)
   device.clear()
-  row(device, 1, { { "FISSION GUARD", colors.lightBlue },
-    { " / ", colors.gray }, { "reactor unavailable", colors.red } })
+  row(device, 1, missingHeader())
   screen.boxes = {}
 end
 
@@ -1879,9 +1948,14 @@ local function step()
   local snapshot = safeReadReactor()
   state.snapshot = snapshot
   if not snapshot then
+    state.lostSince = state.lostSince or os.clock()
     resetWindow()
     drawAll()
     return
+  end
+  if state.lostSince then
+    log("Reactor found again")
+    state.lostSince = nil
   end
 
   if state.trip and snapshot.active then
