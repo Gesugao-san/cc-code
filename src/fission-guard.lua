@@ -28,35 +28,40 @@
 local CONFIG = {
   SODIUM = "mekanism:sodium",  -- chemical id in the ME system
   LOOP_SECONDS = 0.5,          -- safety check and stock sample period
-  WINDOW_SAMPLES = 60,         -- samples per measurement window (30 s)
+  WINDOW_SAMPLES = 20,         -- samples per measurement window (10 s)
   SETTLE_WINDOWS = 1,          -- windows ignored after a burn change
 
+  -- SCRAM limits; fractions are tank fill levels
   MAX_TEMPERATURE = 725,       -- deg C; damage starts at 1200 K (927 C)
-  MIN_COOLANT = 0.10,          -- reactor coolant tank, fraction
-  MAX_HEATED_COOLANT = 0.95,   -- heated coolant tank, fraction
-  MAX_WASTE = 0.90,            -- waste tank, fraction
+  MIN_COOLANT = 0.99,          -- SCRAM when coolant is at or below this
+  MAX_HEATED_COOLANT = 0.01,   -- SCRAM when heated coolant is at or above
+  MAX_WASTE = 0.01,            -- SCRAM when waste is at or above this
   TRIP_BURN_FACTOR = 0.5,      -- burn rate multiplier after a SCRAM
 
+  KNOWN_SUPPLY = 10 * 192000,  -- mB/t from the infinite sources (10 barrels);
+                               -- nil = estimate it from the stock change
   MIN_STOCK = 10000,           -- mB of sodium kept in ME as a reserve
   MIN_BURN = 0.1,              -- mB/t
   BURN_LIMIT = nil,            -- manual upper limit, mB/t; nil = reactor max
-  SAFETY_MARGIN = 0.9,         -- run at this share of the balance point
+  SAFETY_MARGIN = 0.99,        -- run at this share of the balance point
   DEADBAND = 0.05,             -- mB/t of stock change treated as noise
-  DECREASE_FACTOR = 0.8,       -- burn step down while sodium drains
-  INCREASE_FACTOR = 1.1,       -- burn step up while sodium accumulates
-  MAX_STEP_UP = 1.25,          -- largest increase per window
+  DECREASE_FACTOR = 0.95,      -- burn step down while sodium drains
+  INCREASE_FACTOR = 1.02,      -- burn step up while sodium accumulates
+  MAX_STEP_UP = 1.05,          -- largest increase per window
 
-  FULL_FREE_FRACTION = 0.001,  -- free external chemical space counted as full
+  FULL_FREE_MB = 10000000,     -- free tank space (mB) still counted as full;
+                               -- must exceed one tick of consumption
   FLAT_FRACTION = 0.02,        -- if free space is unknown: a stock change
                                -- below this share of consumption = full
 
-  MAX_MODEL_SAMPLES = 12,      -- older measurements are forgotten
-  MIN_MODEL_SAMPLES = 3,
-  MIN_BURN_SPREAD = 0.2,       -- mB/t between lowest and highest sample
+  MAX_MODEL_SAMPLES = 20,      -- older measurements are forgotten
+  MIN_MODEL_SAMPLES = 10,
+  MIN_BURN_SPREAD = 0.1,       -- mB/t between lowest and highest sample
   MIN_FIT_R2 = 0.8,            -- how well samples must fit a straight line
   MIN_PER_BURN = 1,            -- mB of sodium per burn unit, sanity floor
 
   MONITOR_SIDE = "top",        -- preferred monitor; any monitor otherwise
+  BURN_STEP_TINY = 0.01,       -- mB/t per press of -.01 / +.01
   BURN_STEP_SMALL = 0.1,       -- mB/t per press of -.1 / +.1
   BURN_STEP_BIG = 1,           -- mB/t per press of -1 / +1
 
@@ -64,7 +69,7 @@ local CONFIG = {
   LOG_FILE = "fission-guard.log",
 }
 
-local STATE_VERSION = 2 -- bump to discard calibration saved by old versions
+local STATE_VERSION = 3 -- bump to discard calibration saved by old versions
 local TICKS_PER_SECOND = 20
 local KELVIN_OFFSET = 273.15
 local DEGREE = "\176" -- degree sign in the CC font
@@ -209,7 +214,7 @@ end
 local readStock = pickStockReader()
 local readSpace = pickSpaceReader()
 
---- Reads sodium stock and whether storage is full.
+--- Reads sodium stock and whether the sodium tank is full.
 -- @treturn table|nil { stock = number, full = boolean|nil }, nil on error;
 --   full is nil when free space is unknown
 local function readStorage()
@@ -218,11 +223,11 @@ local function readStorage()
     return nil
   end
 
-  local okSpace, free, capacity = pcall(readSpace)
+  local okSpace, free = pcall(readSpace)
   if not (okSpace and free) then
     return { stock = stock, full = nil }
   end
-  return { stock = stock, full = free <= capacity * CONFIG.FULL_FREE_FRACTION }
+  return { stock = stock, full = free <= CONFIG.FULL_FREE_MB }
 end
 
 -- Reactor state ----------------------------------------------------------
@@ -287,21 +292,21 @@ local SAFETY_RULES = {
     describe = function(s) return string.format("damage %.1f", s.damage) end,
   },
   {
-    isUnsafe = function(s) return s.coolant < CONFIG.MIN_COOLANT end,
+    isUnsafe = function(s) return s.coolant <= CONFIG.MIN_COOLANT end,
     describe = function(s)
-      return string.format("coolant %.0f%%", s.coolant * 100)
+      return string.format("coolant %.1f%%", s.coolant * 100)
     end,
   },
   {
-    isUnsafe = function(s) return s.heated > CONFIG.MAX_HEATED_COOLANT end,
+    isUnsafe = function(s) return s.heated >= CONFIG.MAX_HEATED_COOLANT end,
     describe = function(s)
-      return string.format("heated coolant %.0f%%", s.heated * 100)
+      return string.format("heated coolant %.1f%%", s.heated * 100)
     end,
   },
   {
-    isUnsafe = function(s) return s.waste > CONFIG.MAX_WASTE end,
+    isUnsafe = function(s) return s.waste >= CONFIG.MAX_WASTE end,
     describe = function(s)
-      return string.format("waste %.0f%%", s.waste * 100)
+      return string.format("waste %.1f%%", s.waste * 100)
     end,
   },
 }
@@ -362,12 +367,47 @@ local function makeModel(supply, perBurn)
   return { supply = supply, perBurn = perBurn, balance = supply / perBurn }
 end
 
+--- Median of an array of numbers.
+-- @tparam table values Numbers, not empty
+-- @treturn number Median
+local function median(values)
+  local sorted = { table.unpack(values) }
+  table.sort(sorted)
+  local n = #sorted
+  if n % 2 == 1 then
+    return sorted[(n + 1) / 2]
+  end
+  return (sorted[n / 2] + sorted[n / 2 + 1]) / 2
+end
+
+--- Estimates consumption per burn unit when the supply is known:
+-- perBurn = (supply - slope) / burn for every sample, median of them.
+-- @tparam table samples Array of { burn = number, slope = number }
+-- @treturn table|nil Model
+local function fitKnownSupply(samples)
+  local supply = CONFIG.KNOWN_SUPPLY
+  local estimates = {}
+  for _, sample in ipairs(samples) do
+    if sample.burn >= CONFIG.MIN_BURN then
+      table.insert(estimates, (supply - sample.slope) / sample.burn)
+    end
+  end
+  if #estimates < CONFIG.MIN_MODEL_SAMPLES then
+    return nil
+  end
+  return makeModel(supply, median(estimates))
+end
+
 --- Fits "slope = supply - perBurn * burn" to measurements.
+-- With KNOWN_SUPPLY only perBurn is estimated.
 -- @tparam table samples Array of { burn = number, slope = number }
 -- @treturn table|nil Model, or nil if data is missing or inconsistent
 local function fitModel(samples)
   if #samples < CONFIG.MIN_MODEL_SAMPLES then
     return nil
+  end
+  if CONFIG.KNOWN_SUPPLY then
+    return fitKnownSupply(samples)
   end
 
   local points, minBurn, maxBurn = {}, math.huge, -math.huge
@@ -467,8 +507,9 @@ local function resetWindow()
     active = nil,
     burnRate = nil,
     clean = true,
-    sawFull = false,   -- storage was full at least once
-    knowsFull = true,  -- every sample knew whether storage was full
+    openPoints = {},   -- samples taken while the tank was not full
+    sawFull = false,   -- tank was full at least once
+    knowsFull = true,  -- every sample knew whether the tank was full
   }
 end
 
@@ -499,12 +540,19 @@ local function trip(snapshot, reason)
     "after SCRAM")
 end
 
---- Chooses a burn rate while sodium overflows full storage.
--- The real supply is higher than what can be seen, so never go down.
+--- Chooses a burn rate while the sodium tank is full.
+-- The source overflows, so the real supply is hidden: never go down.
+-- If the total stock still drains, ME takes sodium from other storage
+-- (cells) first, so hold until that is used up.
 -- @tparam number current Current burn rate, mB/t
+-- @tparam number slope Total stock change, mB/t
 -- @treturn number Wanted burn rate
 -- @treturn string Reason
-local function overflowBurn(current)
+local function overflowBurn(current, slope)
+  if slope < -CONFIG.DEADBAND then
+    return current, "tank full, ME draining other storage"
+  end
+
   local model = state.model
   if not model then
     return math.max(current * CONFIG.INCREASE_FACTOR,
@@ -542,7 +590,7 @@ local function chooseBurn(current, slope, overflow)
     return current * 0.5, "sodium reserve low"
   end
   if overflow then
-    return overflowBurn(current)
+    return overflowBurn(current, slope)
   end
 
   local model = state.model
@@ -586,7 +634,7 @@ local function recordSample(burn, slope)
   local fitted = fitModel(state.samples)
   if fitted then
     state.model = fitted
-  elseif state.model then
+  elseif state.model and not CONFIG.KNOWN_SUPPLY then
     state.model = refitSupply(state.model, state.samples) or state.model
   end
   saveCalibration(state.samples, state.model)
@@ -616,6 +664,24 @@ local function isOverflow(window, slope, burn)
   return math.abs(slope) <= flatThreshold(burn)
 end
 
+--- Learns from the part of a window where the tank was not full,
+-- if that part is long enough.
+-- @tparam table window Finished window
+-- @tparam number burn Average actual burn rate during the window
+local function recordOpenPart(window, burn)
+  if not window.knowsFull then
+    return
+  end
+  if #window.openPoints < CONFIG.WINDOW_SAMPLES / 2 then
+    return
+  end
+
+  local perSecond = linearFit(window.openPoints)
+  if perSecond then
+    recordSample(burn, perSecond / TICKS_PER_SECOND)
+  end
+end
+
 --- Closes the current window: measures, learns and calibrates.
 -- @tparam table snapshot Reactor snapshot
 local function finishWindow(snapshot)
@@ -641,6 +707,8 @@ local function finishWindow(snapshot)
   state.slope, state.overflow = slope, overflow
   if not overflow then
     recordSample(burn, slope)
+  else
+    recordOpenPart(window, burn)
   end
 
   if snapshot.active and state.auto and not state.trip then
@@ -666,9 +734,13 @@ local function addSample(snapshot, storage)
     window.clean = false -- someone changed the reactor mid-window
   end
 
+  local point = { x = os.clock(), y = storage.stock }
   window.sawFull = window.sawFull or storage.full == true
   window.knowsFull = window.knowsFull and storage.full ~= nil
-  table.insert(window.points, { x = os.clock(), y = storage.stock })
+  table.insert(window.points, point)
+  if storage.full == false then
+    table.insert(window.openPoints, point)
+  end
   window.burnSum = window.burnSum + (snapshot.active and snapshot.actualBurn
     or 0)
 end
@@ -779,31 +851,39 @@ local BUTTONS = {
       return " MANUAL ", colors.orange, colors.black
     end,
   },
-  {
-    id = "downBig",
-    press = burnStep(-CONFIG.BURN_STEP_BIG),
-    style = function() return " -1 ", colors.gray, colors.white end,
-  },
-  {
-    id = "downSmall",
-    press = burnStep(-CONFIG.BURN_STEP_SMALL),
-    style = function() return " -.1 ", colors.gray, colors.white end,
-  },
-  {
-    id = "upSmall",
-    press = burnStep(CONFIG.BURN_STEP_SMALL),
-    style = function() return " +.1 ", colors.gray, colors.white end,
-  },
-  {
-    id = "upBig",
-    press = burnStep(CONFIG.BURN_STEP_BIG),
-    style = function() return " +1 ", colors.gray, colors.white end,
-  },
 }
 
+--- Makes a gray burn step button.
+-- @tparam string id Button id
+-- @tparam string text Label
+-- @tparam number delta Step, mB/t
+-- @treturn table Button definition
+local function stepButton(id, text, delta)
+  return {
+    id = id,
+    press = burnStep(delta),
+    style = function() return text, colors.gray, colors.white end,
+  }
+end
+
+--- Second button row: burn steps, down on the left, up on the right.
+local STEP_BUTTONS = {
+  stepButton("downBig", " -1 ", -CONFIG.BURN_STEP_BIG),
+  stepButton("downSmall", " -.1 ", -CONFIG.BURN_STEP_SMALL),
+  stepButton("downTiny", " -.01 ", -CONFIG.BURN_STEP_TINY),
+  stepButton("upTiny", " +.01 ", CONFIG.BURN_STEP_TINY),
+  stepButton("upSmall", " +.1 ", CONFIG.BURN_STEP_SMALL),
+  stepButton("upBig", " +1 ", CONFIG.BURN_STEP_BIG),
+}
+
+--- Button rows, top to bottom.
+local BUTTON_ROWS = { BUTTONS, STEP_BUTTONS }
+
 local BUTTONS_BY_ID = {}
-for _, button in ipairs(BUTTONS) do
-  BUTTONS_BY_ID[button.id] = button
+for _, buttonRow in ipairs(BUTTON_ROWS) do
+  for _, button in ipairs(buttonRow) do
+    BUTTONS_BY_ID[button.id] = button
+  end
 end
 
 -- Formatting -------------------------------------------------------------
@@ -872,7 +952,16 @@ local function highRisk(value, limit)
   return riskColor(value / limit)
 end
 
---- Color for a value where lower is worse (coolant, fuel).
+--- Color for a tank that should stay full (coolant): 1.0 is safe,
+-- the trip level is the limit.
+-- @tparam number value Current fill, 0..1
+-- @tparam number limit Trip fill level
+-- @treturn number Color
+local function depletionRisk(value, limit)
+  return riskColor((1 - value) / math.max(1 - limit, 1e-9))
+end
+
+--- Color for a value where lower is worse (fuel).
 -- @tparam number value Current value
 -- @tparam number limit Lowest acceptable value
 -- @treturn number Color
@@ -953,7 +1042,7 @@ local function contentRows(s)
     { label("Damage"), { string.format("%.1f", s.damage),
       s.damage > 0 and colors.red or colors.lime } },
     { label("Coolant"), { percent(s.coolant),
-      lowRisk(s.coolant, CONFIG.MIN_COOLANT) },
+      depletionRisk(s.coolant, CONFIG.MIN_COOLANT) },
       { "   Heated ", colors.lightGray },
       { percent(s.heated), highRisk(s.heated, CONFIG.MAX_HEATED_COOLANT) } },
     { label("Waste"), { percent(s.waste),
@@ -970,7 +1059,7 @@ local function contentRows(s)
     modelRow(),
     { label("Last"), { state.lastAction, colors.lightGray } },
     { { string.format(
-      "Trip: %.0f%sC | coolant %.0f%% | heated %.0f%% | waste %.0f%%",
+      "Trip: %.0f%sC, coolant<=%.0f%%, heated>=%.0f%%, waste>=%.0f%%",
       CONFIG.MAX_TEMPERATURE, DEGREE, CONFIG.MIN_COOLANT * 100,
       CONFIG.MAX_HEATED_COOLANT * 100, CONFIG.MAX_WASTE * 100),
       colors.gray } },
@@ -985,11 +1074,11 @@ local LAYOUT_WIDTH = 51       -- widest content row
 local CONTENT_ROWS = 12       -- rows returned by contentRows
 local TOUCH_BUTTON_HEIGHT = 3 -- button height on a big enough monitor
 
---- Rows a screen needs for content, a gap and buttons.
+--- Rows a screen needs for content and button rows, each after a gap.
 -- @tparam number buttonHeight Button height in rows
 -- @treturn number Rows
 local function neededRows(buttonHeight)
-  return CONTENT_ROWS + 1 + buttonHeight
+  return CONTENT_ROWS + #BUTTON_ROWS * (1 + buttonHeight)
 end
 
 --- Sets a color if the device can show colors.
@@ -1050,19 +1139,19 @@ local function drawButton(screen, button, snapshot, left, top)
     bottom = top + height - 1 }
 end
 
---- Draws the button bar and remembers touch areas.
+--- Draws one row of buttons and adds their touch areas to the screen.
 -- @tparam table screen Screen
+-- @tparam table buttons Button definitions, left to right
 -- @tparam table snapshot Reactor snapshot
--- @tparam number top First row of the bar
-local function drawButtons(screen, snapshot, top)
+-- @tparam number top First row of the button row
+local function drawButtonRow(screen, buttons, snapshot, top)
   local device = screen.device
   for dy = 0, screen.buttonHeight - 1 do
     row(device, top + dy, {})
   end
 
-  screen.boxes = {}
   local left = 1
-  for _, button in ipairs(BUTTONS) do
+  for _, button in ipairs(buttons) do
     local box = drawButton(screen, button, snapshot, left, top)
     if not box then
       break
@@ -1074,6 +1163,19 @@ local function drawButtons(screen, snapshot, top)
   paint(device, "setTextColor", colors.white)
 end
 
+--- Draws all button rows, each after a blank row.
+-- @tparam table screen Screen
+-- @tparam table snapshot Reactor snapshot
+-- @tparam number top Row right after the content
+local function drawButtons(screen, snapshot, top)
+  screen.boxes = {}
+  for _, buttons in ipairs(BUTTON_ROWS) do
+    row(screen.device, top, {})
+    drawButtonRow(screen, buttons, snapshot, top + 1)
+    top = top + 1 + screen.buttonHeight
+  end
+end
+
 --- Draws the full status screen with buttons.
 -- @tparam table screen Screen
 -- @tparam table snapshot Reactor snapshot
@@ -1081,7 +1183,7 @@ local function drawStatus(screen, snapshot)
   for y, segments in ipairs(contentRows(snapshot)) do
     row(screen.device, y, segments)
   end
-  drawButtons(screen, snapshot, CONTENT_ROWS + 2)
+  drawButtons(screen, snapshot, CONTENT_ROWS + 1)
 end
 
 --- Draws the "reactor unavailable" screen without buttons.
