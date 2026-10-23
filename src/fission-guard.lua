@@ -636,6 +636,7 @@ local state = {
   restart = false,     -- an upgrade asks to restart
   unavailable = nil,   -- why the reactor cannot be read
   lostSince = nil,     -- os.clock() when the reactor was lost
+  lastGood = nil,      -- last snapshot read before the reactor was lost
   asleep = false,      -- screens are dark (energy saving mode)
   sleepDrawn = false,  -- the dark screens are already drawn
   lastInput = os.clock(), -- last touch, click or key
@@ -1265,10 +1266,14 @@ local SLASH = { " / ", colors.gray }
 
 --- Header title with the reactor state:
 -- "FISSION GUARDING" while running, "/ READY" when off,
--- "/ TRIPPED: reason" after a SCRAM.
+-- "/ TRIPPED: reason" after a SCRAM, "/ SEARCHING REACTOR" while the last
+-- known data is shown during a search.
 -- @tparam table snapshot Reactor snapshot
 -- @treturn table Segments
 local function headerTitle(snapshot)
+  if state.lostSince then
+    return { TITLE, SLASH, { "SEARCHING REACTOR", colors.yellow } }
+  end
   if state.trip then
     return { TITLE, SLASH, { "TRIPPED: " .. state.trip, colors.red } }
   end
@@ -1829,12 +1834,20 @@ local function drawStatus(screen, snapshot)
   drawButtons(screen, snapshot, CONTENT_ROWS + 1)
 end
 
+--- Tells whether a lost reactor is still being searched for.
+-- @treturn boolean True during the first SEARCH_SECONDS of a loss
+local function isSearching()
+  if not state.lostSince then
+    return false
+  end
+  return os.clock() - state.lostSince < CONFIG.SEARCH_SECONDS
+end
+
 --- Header while there is no reactor: SEARCHING for SEARCH_SECONDS, then
 -- UNAVAILABLE with the reason.
 -- @treturn table Segments
 local function missingHeader()
-  local lost = os.clock() - (state.lostSince or os.clock())
-  if lost < CONFIG.SEARCH_SECONDS then
+  if isSearching() then
     return { TITLE, SLASH, { "SEARCHING REACTOR", colors.yellow } }
   end
   return { TITLE, SLASH, { "UNAVAILABLE: " .. (state.unavailable
@@ -1845,9 +1858,11 @@ end
 -- @tparam table screen Screen
 local function drawUnavailable(screen)
   local device = screen.device
-  paint(device, "setBackgroundColor", colors.black)
-  device.clear()
+  local _, height = device.getSize()
   row(device, 1, missingHeader())
+  for y = 2, height do
+    row(device, y, {}) -- line by line: a full clear would flash
+  end
   screen.boxes = {}
 end
 
@@ -1869,7 +1884,8 @@ end
 local function prepareMonitor(screen)
   local device = screen.device
   fitTextScale(device)
-  local _, height = device.getSize()
+  local width, height = device.getSize()
+  screen.fittedSize = width .. "x" .. height
   screen.buttonHeight = height >= neededRows(TOUCH_BUTTON_HEIGHT)
     and TOUCH_BUTTON_HEIGHT or 1
   paint(device, "setBackgroundColor", colors.black)
@@ -1963,6 +1979,9 @@ local function drawAll()
   end
 
   local snapshot = state.snapshot
+  if not snapshot and isSearching() then
+    snapshot = state.lastGood -- keep the screen steady during a short loss
+  end
   for _, screen in ipairs(screens) do
     if snapshot then
       pcall(drawStatus, screen, snapshot)
@@ -2034,12 +2053,16 @@ local function step()
   local snapshot = safeReadReactor()
   state.snapshot = snapshot
   if not snapshot then
-    state.lostSince = state.lostSince or os.clock()
+    if not state.lostSince then
+      state.lostSince = os.clock()
+      log("Reactor lost: " .. tostring(state.unavailable))
+    end
     resetWindow()
-    updateSleep(true)
+    updateSleep(not isSearching())
     drawAll()
     return
   end
+  state.lastGood = snapshot
   if state.lostSince then
     log("Reactor found again")
     state.lostSince = nil
@@ -2117,10 +2140,16 @@ local EVENT_HANDLERS = {
   end,
   monitor_resize = function(side)
     local screen = screenByName(side)
-    if screen then
-      prepareMonitor(screen)
-      drawAll()
+    if not screen then
+      return
     end
+    -- setTextScale may raise this event too; refit only on a real change
+    local width, height = screen.device.getSize()
+    if screen.fittedSize == width .. "x" .. height then
+      return
+    end
+    prepareMonitor(screen)
+    drawAll()
   end,
 }
 
