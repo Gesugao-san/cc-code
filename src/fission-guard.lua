@@ -28,7 +28,8 @@
 local CONFIG = {
   SODIUM = "mekanism:sodium",  -- chemical id in the ME system
   LOOP_SECONDS = 0.5,          -- safety check and stock sample period
-  WINDOW_SAMPLES = 20,         -- samples per measurement window (10 s)
+  WINDOW_SECONDS = 10,         -- length of one measurement window
+  MIN_WINDOW_POINTS = 4,       -- fewer stock samples in a window = no data
   SETTLE_WINDOWS = 1,          -- windows ignored after a burn change
 
   -- SCRAM limits; fractions are tank fill levels
@@ -502,6 +503,7 @@ state.model = fitModel(state.samples) or validModel(calibration.model)
 --- Starts a new measurement window.
 local function resetWindow()
   state.window = {
+    startTime = nil,   -- os.clock() of the first sample
     points = {},
     burnSum = 0,
     active = nil,
@@ -672,7 +674,8 @@ local function recordOpenPart(window, burn)
   if not window.knowsFull then
     return
   end
-  if #window.openPoints < CONFIG.WINDOW_SAMPLES / 2 then
+  local needed = math.max(CONFIG.MIN_WINDOW_POINTS, #window.points / 2)
+  if #window.openPoints < needed then
     return
   end
 
@@ -696,6 +699,9 @@ local function finishWindow(snapshot)
     return
   end
 
+  if #window.points < CONFIG.MIN_WINDOW_POINTS then
+    return
+  end
   local perSecond = linearFit(window.points)
   if not perSecond then
     return
@@ -735,6 +741,7 @@ local function addSample(snapshot, storage)
   end
 
   local point = { x = os.clock(), y = storage.stock }
+  window.startTime = window.startTime or point.x
   window.sawFull = window.sawFull or storage.full == true
   window.knowsFull = window.knowsFull and storage.full ~= nil
   table.insert(window.points, point)
@@ -916,13 +923,6 @@ local function formatSigned(value)
   return sign .. formatAmount(value)
 end
 
---- Formats a fraction as a percentage.
--- @tparam number value Fraction, 0..1
--- @treturn string Text such as " 87%"
-local function percent(value)
-  return string.format("%3.0f%%", value * 100)
-end
-
 --- Risk colors by how close a value is to its trip limit, worst first.
 local RISK_TIERS = {
   { from = 0.9, color = colors.red },
@@ -1028,27 +1028,110 @@ local function modelRow()
   }
 end
 
+--- Number with a fixed count of digits; leading zeros are dimmed.
+-- @tparam number value Non-negative number, rounded to an integer
+-- @tparam number width Digits to show
+-- @tparam number color Color of the significant digits
+-- @treturn table Segments
+local function padded(value, width, color)
+  local digits = string.format("%0" .. width .. ".0f", math.max(0, value))
+  local zeros = digits:match("^0*")
+  if #zeros == #digits then
+    zeros = zeros:sub(2) -- a plain zero keeps its last digit bright
+  end
+  return { { zeros, colors.gray }, { digits:sub(#zeros + 1), color } }
+end
+
+--- Zero-padded percentage segments, e.g. dim "0" + "87%".
+-- @tparam number value Fraction, 0..1
+-- @tparam number color Color of the value
+-- @treturn table Segments
+local function paddedPercent(value, color)
+  local segments = padded(value * 100, 3, color)
+  table.insert(segments, { "%", color })
+  return segments
+end
+
+--- Inner widths of the two status grid columns.
+local GRID_WIDTHS = { 12, 13 }
+
+--- Total length of the text in segments.
+-- @tparam table segments Array of { text, color }
+-- @treturn number Characters
+local function segmentsLength(segments)
+  local length = 0
+  for _, segment in ipairs(segments) do
+    length = length + #segment[1]
+  end
+  return length
+end
+
+--- Appends segments to a row.
+-- @tparam table target Row being built
+-- @tparam table segments Segments to add
+local function appendSegments(target, segments)
+  for _, segment in ipairs(segments) do
+    table.insert(target, segment)
+  end
+end
+
+--- One grid row: "| NAME   value | NAME   value |" with values right-aligned.
+-- @tparam table cells Two { name, segments } pairs
+-- @treturn table Segments
+local function gridRow(cells)
+  local result = { { "| ", colors.gray } }
+  for i, cell in ipairs(cells) do
+    local name, value = cell[1], cell[2]
+    local gap = math.max(1, GRID_WIDTHS[i] - #name - segmentsLength(value))
+    table.insert(result, { name .. string.rep(" ", gap), colors.lightGray })
+    appendSegments(result, value)
+    table.insert(result, { i < #cells and " | " or " |", colors.gray })
+  end
+  return result
+end
+
+--- Grid rows with coolant, fuel, heated coolant, waste, temperature, damage.
+-- @tparam table s Reactor snapshot
+-- @treturn table Array of three rows
+local function gridRows(s)
+  local tempColor = highRisk(s.temperature, CONFIG.MAX_TEMPERATURE)
+  local temp = padded(s.temperature, 4, tempColor)
+  table.insert(temp, { " " .. DEGREE .. "C", tempColor })
+
+  local damage = {
+    { string.format("%.1f", s.damage), s.damage > 0 and colors.red
+      or colors.lime },
+    { "/100.0", colors.gray },
+  }
+
+  return {
+    gridRow({
+      { "COOL", paddedPercent(s.coolant,
+        depletionRisk(s.coolant, CONFIG.MIN_COOLANT)) },
+      { "FUEL", paddedPercent(s.fuel, lowRisk(s.fuel, FUEL_DISPLAY_LIMIT)) },
+    }),
+    gridRow({
+      { "HEAT", paddedPercent(s.heated,
+        highRisk(s.heated, CONFIG.MAX_HEATED_COOLANT)) },
+      { "WASTE", paddedPercent(s.waste, highRisk(s.waste, CONFIG.MAX_WASTE)) },
+    }),
+    gridRow({ { "TMP", temp }, { "DMG", damage } }),
+  }
+end
+
 --- Builds all status rows for a snapshot.
 -- @tparam table s Reactor snapshot
 -- @treturn table Array of rows; each row is an array of { text, color }
 local function contentRows(s)
   local header, headerColor = headerText(s)
+  local grid = gridRows(s)
   return {
     { { "FISSION GUARD", colors.lightBlue }, { " / ", colors.gray },
       { header, headerColor } },
     { { string.rep("-", 200), colors.gray } },
-    { label("Temp"), { string.format("%.0f %sC", s.temperature, DEGREE),
-      highRisk(s.temperature, CONFIG.MAX_TEMPERATURE) } },
-    { label("Damage"), { string.format("%.1f", s.damage),
-      s.damage > 0 and colors.red or colors.lime } },
-    { label("Coolant"), { percent(s.coolant),
-      depletionRisk(s.coolant, CONFIG.MIN_COOLANT) },
-      { "   Heated ", colors.lightGray },
-      { percent(s.heated), highRisk(s.heated, CONFIG.MAX_HEATED_COOLANT) } },
-    { label("Waste"), { percent(s.waste),
-      highRisk(s.waste, CONFIG.MAX_WASTE) },
-      { "   Fuel   ", colors.lightGray },
-      { percent(s.fuel), lowRisk(s.fuel, FUEL_DISPLAY_LIMIT) } },
+    grid[1],
+    grid[2],
+    grid[3],
     { label("Burn"), { string.format("%.2f", s.burnRate), colors.orange },
       { " set, ", colors.gray },
       { string.format("%.2f", s.actualBurn), colors.white },
@@ -1071,7 +1154,7 @@ end
 -- Screens ----------------------------------------------------------------
 
 local LAYOUT_WIDTH = 51       -- widest content row
-local CONTENT_ROWS = 12       -- rows returned by contentRows
+local CONTENT_ROWS = 11       -- rows returned by contentRows
 local TOUCH_BUTTON_HEIGHT = 3 -- button height on a big enough monitor
 
 --- Rows a screen needs for content and button rows, each after a gap.
@@ -1329,7 +1412,8 @@ local function step()
   state.stock = storage and storage.stock
   state.full = storage and storage.full
   addSample(snapshot, storage)
-  if #state.window.points >= CONFIG.WINDOW_SAMPLES then
+  local started = state.window.startTime
+  if started and os.clock() - started >= CONFIG.WINDOW_SECONDS then
     finishWindow(snapshot)
   end
 
