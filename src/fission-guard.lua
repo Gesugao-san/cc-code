@@ -66,6 +66,9 @@ local CONFIG = {
   BURN_STEP_SMALL = 0.1,       -- mB/t per press of -.1 / +.1
   BURN_STEP_BIG = 1,           -- mB/t per press of -1 / +1
 
+  UPDATE_URL = "https://raw.githubusercontent.com/Gesugao-san/cc-code/"
+    .. "main/src/fission-guard.lua",
+
   STATE_FILE = "fission-guard.state",
   LOG_FILE = "fission-guard.log",
 }
@@ -94,6 +97,38 @@ local function log(message)
 
   file.writeLine(os.date("%Y-%m-%d %H:%M:%S") .. " " .. message)
   file.close()
+end
+
+--- Reads a whole file.
+-- @tparam string path File path
+-- @treturn string|nil Content, or nil if it cannot be read
+local function readFile(path)
+  if not fs.exists(path) then
+    return nil
+  end
+
+  local file = fs.open(path, "r")
+  if not file then
+    return nil
+  end
+  local text = file.readAll()
+  file.close()
+  return text
+end
+
+--- Writes a whole file.
+-- @tparam string path File path
+-- @tparam string text Content
+-- @treturn boolean True on success
+local function writeFile(path, text)
+  local file = fs.open(path, "w")
+  if not file then
+    return false
+  end
+
+  file.write(text)
+  file.close()
+  return true
 end
 
 --- Loads saved calibration; data from other versions is ignored.
@@ -818,6 +853,115 @@ local function burnStep(delta)
   end
 end
 
+-- Self-upgrade ----------------------------------------------------------
+
+--- Path of this program, so a renamed copy updates itself.
+local PROGRAM_PATH = shell and shell.getRunningProgram() or "fission-guard.lua"
+local BACKUP_PATH = PROGRAM_PATH .. ".bak"
+local PROGRAM_MARKER = "@script fission-guard"
+
+--- Downloads the newest version from GitHub.
+-- @treturn string|nil Code
+-- @treturn string|nil Error message
+local function downloadUpdate()
+  if not http then
+    return nil, "HTTP API is disabled"
+  end
+
+  -- the query string only defeats caches between here and GitHub
+  local url = CONFIG.UPDATE_URL .. "?t=" .. os.epoch("utc")
+  local response, err = http.get(url)
+  if not response then
+    return nil, err or "download failed"
+  end
+
+  local code = response.readAll()
+  response.close()
+  return code
+end
+
+--- Checks that downloaded code is this program and compiles.
+-- @tparam string|nil code Downloaded code
+-- @treturn boolean True if the code can be installed
+-- @treturn string|nil Reason it cannot
+local function validateUpdate(code)
+  if not code or #code == 0 then
+    return false, "empty download"
+  end
+  if not code:find(PROGRAM_MARKER, 1, true) then
+    return false, "not fission-guard"
+  end
+
+  local compiled, err = load(code, "=" .. PROGRAM_PATH)
+  if not compiled then
+    return false, "syntax error: " .. tostring(err)
+  end
+  return true
+end
+
+--- Downloads, checks and installs the newest version, keeping a backup.
+-- The guard keeps running meanwhile; on success it restarts itself.
+local function upgrade()
+  state.lastAction = "upgrade: downloading"
+  local code, err = downloadUpdate()
+  local ok, reason = validateUpdate(code)
+  if not ok then
+    state.lastAction = "upgrade failed: " .. tostring(err or reason)
+    log(state.lastAction)
+    return
+  end
+
+  local current = readFile(PROGRAM_PATH)
+  if current == code then
+    state.lastAction = "already up to date"
+    return
+  end
+  if current and not writeFile(BACKUP_PATH, current) then
+    state.lastAction = "upgrade failed: cannot write backup"
+    return
+  end
+  if not writeFile(PROGRAM_PATH, code) then
+    state.lastAction = "upgrade failed: cannot write " .. PROGRAM_PATH
+    return
+  end
+
+  log("Upgraded from GitHub, restarting")
+  state.lastAction = "upgraded, restarting"
+  state.restart = true
+end
+
+--- Runs a program file the way the shell does.
+-- @tparam string path File path
+-- @treturn boolean True if it finished without an error
+-- @return Error message
+local function runFile(path)
+  local env = setmetatable({ shell = shell, multishell = multishell },
+    { __index = _G })
+  local program, err = loadfile(path, nil, env)
+  if not program then
+    return false, err
+  end
+  return pcall(program)
+end
+
+--- Starts the upgraded version; if it crashes, restores and starts the
+-- backup so the reactor is not left without a guard.
+local function runUpgraded()
+  local ok, err = runFile(PROGRAM_PATH)
+  if ok or err == "Terminated" then
+    return
+  end
+
+  printError("New version crashed: " .. tostring(err))
+  log("New version crashed: " .. tostring(err) .. "; restoring backup")
+  local backup = readFile(BACKUP_PATH)
+  if not (backup and writeFile(PROGRAM_PATH, backup)) then
+    printError("Cannot restore " .. BACKUP_PATH)
+    return
+  end
+  runFile(PROGRAM_PATH)
+end
+
 --- Picks a color pair by whether a button can be used now.
 -- @tparam boolean enabled Button is usable
 -- @tparam number background Background color when usable
@@ -856,6 +1000,14 @@ local BUTTONS = {
         return "  AUTO  ", colors.cyan, colors.black
       end
       return " MANUAL ", colors.orange, colors.black
+    end,
+  },
+  {
+    id = "upgrade",
+    press = upgrade,
+    style = function()
+      return " UPGRADE ", enabledColors(http ~= nil, colors.purple,
+        colors.white)
     end,
   },
 }
@@ -999,13 +1151,13 @@ local function padded(value, width, color)
   return { { zeros, colors.gray }, { digits:sub(#zeros + 1), color } }
 end
 
---- Zero-padded percentage segments, e.g. dim "0" + "87%".
+--- Zero-padded percentage segments, e.g. dim "0" + "87 %".
 -- @tparam number value Fraction, 0..1
 -- @tparam number color Color of the value
 -- @treturn table Segments
 local function paddedPercent(value, color)
   local segments = padded(value * 100, 3, color)
-  table.insert(segments, { "%", color })
+  table.insert(segments, { " %", color })
   return segments
 end
 
@@ -1097,7 +1249,7 @@ local function textCell(text, color)
 end
 
 --- Column widths of the parameter table: PARAM, VALUE, TRIP.
-local PARAM_WIDTHS = { 5, 7, 7 }
+local PARAM_WIDTHS = { 5, 7, 9 }
 
 --- Parameter table rows: name, value cell and SCRAM limit.
 local PARAM_ROWS = {
@@ -1108,7 +1260,7 @@ local PARAM_ROWS = {
         depletionRisk(s.coolant, CONFIG.MIN_COOLANT))
     end,
     trip = function()
-      return string.format("<=%.0f%%", CONFIG.MIN_COOLANT * 100)
+      return string.format("<= %.0f %%", CONFIG.MIN_COOLANT * 100)
     end,
   },
   {
@@ -1118,7 +1270,7 @@ local PARAM_ROWS = {
         highRisk(s.heated, CONFIG.MAX_HEATED_COOLANT))
     end,
     trip = function()
-      return string.format(">=%.0f%%", CONFIG.MAX_HEATED_COOLANT * 100)
+      return string.format(">= %.0f %%", CONFIG.MAX_HEATED_COOLANT * 100)
     end,
   },
   {
@@ -1127,7 +1279,7 @@ local PARAM_ROWS = {
       return paddedPercent(s.waste, highRisk(s.waste, CONFIG.MAX_WASTE))
     end,
     trip = function()
-      return string.format(">=%.0f%%", CONFIG.MAX_WASTE * 100)
+      return string.format(">= %.0f %%", CONFIG.MAX_WASTE * 100)
     end,
   },
   {
@@ -1139,13 +1291,13 @@ local PARAM_ROWS = {
       return segments
     end,
     trip = function()
-      return string.format(">=%.0f%sC", CONFIG.MAX_TEMPERATURE, DEGREE)
+      return string.format(">= %.0f %sC", CONFIG.MAX_TEMPERATURE, DEGREE)
     end,
   },
   {
     name = "DMG",
     value = function(s)
-      return textCell(string.format("%.1f", s.damage),
+      return paddedPercent(s.damage / 100,
         s.damage > 0 and colors.red or colors.lime)
     end,
     trip = function() return ">0" end,
@@ -1537,9 +1689,9 @@ local EVENT_HANDLERS = {
   end,
 }
 
---- Handles touches, clicks and keys forever.
+--- Handles touches, clicks and keys until an upgrade asks for a restart.
 local function inputLoop()
-  while true do
+  while not state.restart do
     local event = { os.pullEvent() }
     local handler = EVENT_HANDLERS[event[1]]
     if handler then
@@ -1553,4 +1705,8 @@ term.setBackgroundColor(colors.black)
 term.clear()
 log("Guard started")
 parallel.waitForAny(guardLoop, inputLoop)
+
+if state.restart then
+  runUpgraded()
+end
 
