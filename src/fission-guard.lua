@@ -65,6 +65,8 @@ local CONFIG = {
   MONITOR_SIDE = "top",        -- preferred monitor; any monitor otherwise
   HEARTBEAT_CHAR = "\7",       -- blinking dot in the header (CC bullet)
   STALL_SECONDS = 5,           -- no guard step this long = red steady dot
+  SLEEP_SECONDS = 300,         -- screens go dark after this long without
+                               -- touches, clicks or keys
   SEARCH_SECONDS = 5,          -- look for a lost reactor this long before
                                -- reporting it unavailable
   BURN_STEP_TINY = 0.01,       -- mB/t per press of -.01 / +.01
@@ -634,6 +636,11 @@ local state = {
   restart = false,     -- an upgrade asks to restart
   unavailable = nil,   -- why the reactor cannot be read
   lostSince = nil,     -- os.clock() when the reactor was lost
+  asleep = false,      -- screens are dark (energy saving mode)
+  sleepDrawn = false,  -- the dark screens are already drawn
+  lastInput = os.clock(), -- last touch, click or key
+  ignoreInputUntil = 0, -- input right after waking up is ignored
+  lastAlarm = false,   -- a trip or a lost reactor at the previous step
 }
 state.model = fitModel(state.samples) or validModel(calibration.model)
 
@@ -1118,6 +1125,14 @@ local BUTTONS = {
       return "UPGRADE", enabledColors(http ~= nil, colors.purple,
         colors.white)
     end,
+  },
+  {
+    id = "sleep",
+    press = function()
+      state.asleep, state.sleepDrawn = true, false
+      log("Screens put to sleep")
+    end,
+    style = function() return "SLEEP", colors.blue, colors.white end,
   },
 }
 
@@ -1901,8 +1916,52 @@ local function screenByName(name)
   return nil
 end
 
+--- Text in the middle of the computer screen while asleep.
+local SLEEP_LINES = {
+  { "ENERGY SAVING MODE", colors.gray },
+  { "" },
+  { "TAP TO WAKE UP", colors.lightGray },
+}
+
+--- Draws a dark screen; the computer screen also gets SLEEP_LINES.
+-- @tparam table screen Screen
+local function drawSleeping(screen)
+  local device = screen.device
+  paint(device, "setBackgroundColor", colors.black)
+  device.clear()
+  screen.boxes = {}
+  if screen ~= termScreen then
+    return
+  end
+
+  local width, height = device.getSize()
+  local top = math.floor((height - #SLEEP_LINES) / 2) + 1
+  for i, line in ipairs(SLEEP_LINES) do
+    device.setCursorPos(math.floor((width - #line[1]) / 2) + 1, top + i - 1)
+    paint(device, "setTextColor", line[2] or colors.white)
+    device.write(line[1])
+  end
+  paint(device, "setTextColor", colors.white)
+end
+
+--- Draws the dark screens once after falling asleep.
+local function drawAsleep()
+  if state.sleepDrawn then
+    return
+  end
+  for _, screen in ipairs(screens) do
+    pcall(drawSleeping, screen)
+  end
+  state.sleepDrawn = true
+end
+
 --- Redraws every screen; a detached monitor is skipped.
 local function drawAll()
+  if state.asleep then
+    drawAsleep()
+    return
+  end
+
   local snapshot = state.snapshot
   for _, screen in ipairs(screens) do
     if snapshot then
@@ -1943,6 +2002,33 @@ end
 
 -- Main loops -------------------------------------------------------------
 
+--- Lights the screens up again; input in the next moment is ignored so
+-- the waking touch does not press a button.
+local function wake()
+  state.asleep, state.sleepDrawn = false, false
+  state.lastInput = os.clock()
+  state.ignoreInputUntil = os.clock() + 0.5
+  drawAll()
+end
+
+--- Wakes up on a new alarm and falls asleep after SLEEP_SECONDS without
+-- input, but not while an alarm is on.
+-- @tparam boolean alarm A trip is active or the reactor is lost
+local function updateSleep(alarm)
+  local newAlarm = alarm and not state.lastAlarm
+  state.lastAlarm = alarm
+  if newAlarm and state.asleep then
+    wake()
+    return
+  end
+
+  local idle = os.clock() - state.lastInput >= CONFIG.SLEEP_SECONDS
+  if idle and not alarm and not state.asleep then
+    state.asleep, state.sleepDrawn = true, false
+    log("Screens asleep after inactivity")
+  end
+end
+
 --- One guard step: safety first, then measurement and calibration.
 local function step()
   local snapshot = safeReadReactor()
@@ -1950,6 +2036,7 @@ local function step()
   if not snapshot then
     state.lostSince = state.lostSince or os.clock()
     resetWindow()
+    updateSleep(true)
     drawAll()
     return
   end
@@ -1978,6 +2065,7 @@ local function step()
     finishWindow(snapshot)
   end
 
+  updateSleep(state.trip ~= nil)
   drawAll()
 end
 
@@ -1994,7 +2082,7 @@ end
 --- Redraws only the header row on every screen.
 local function drawHeaders()
   local snapshot = state.snapshot
-  if not snapshot then
+  if not snapshot or state.asleep then
     return
   end
   for _, screen in ipairs(screens) do
@@ -2036,14 +2124,41 @@ local EVENT_HANDLERS = {
   end,
 }
 
+--- Events that count as user activity and wake the screens.
+local WAKE_EVENTS = {
+  monitor_touch = true,
+  mouse_click = true,
+  mouse_scroll = true,
+  key = true,
+  char = true,
+}
+
+--- Handles one event: user activity wakes the screens (that touch does
+-- nothing else) and resets the sleep timer.
+-- @tparam string name Event name
+-- @param ... Event parameters
+local function handleEvent(name, ...)
+  if WAKE_EVENTS[name] then
+    if state.asleep then
+      wake()
+      return
+    end
+    state.lastInput = os.clock()
+    if os.clock() < state.ignoreInputUntil then
+      return
+    end
+  end
+
+  local handler = EVENT_HANDLERS[name]
+  if handler then
+    handler(...)
+  end
+end
+
 --- Handles touches, clicks and keys until an upgrade asks for a restart.
 local function inputLoop()
   while not state.restart do
-    local event = { os.pullEvent() }
-    local handler = EVENT_HANDLERS[event[1]]
-    if handler then
-      handler(table.unpack(event, 2))
-    end
+    handleEvent(os.pullEvent())
   end
 end
 
