@@ -591,7 +591,8 @@ local state = {
   slope = nil,         -- last measured stock change, mB/t
   lastAction = "starting",
   lastStep = nil,      -- os.clock() of the last finished guard step
-  beat = false,        -- heartbeat dot shown
+  beat = false,        -- heartbeat dot lit in this blink
+  showBeat = true,     -- heartbeat visible; toggled by touch, not saved
   restart = false,     -- an upgrade asks to restart
 }
 state.model = fitModel(state.samples) or validModel(calibration.model)
@@ -1539,15 +1540,23 @@ local function modelCells()
 end
 
 --- Heartbeat dot: blinks while guard steps run, steady red if they stall.
--- @treturn table Segment
+-- Touching it hides or shows the blinking; a stall is always shown.
+-- @treturn table Segment with a touch area
 local function heartbeat()
+  local lit = " " .. CONFIG.HEARTBEAT_CHAR .. " "
   local stalled = os.clock() - (state.lastStep or os.clock())
     > CONFIG.STALL_SECONDS
   if stalled then
-    return { " " .. CONFIG.HEARTBEAT_CHAR, colors.red }
+    return { lit, colors.red, nil, id = "heartbeat" }
   end
-  return { state.beat and " " .. CONFIG.HEARTBEAT_CHAR or "  ", colors.lime }
+
+  local shown = state.showBeat and state.beat
+  return { shown and lit or "   ", colors.lime, nil, id = "heartbeat" }
 end
+
+BUTTONS_BY_ID.heartbeat = {
+  press = function() state.showBeat = not state.showBeat end,
+}
 
 --- Header row: title, reactor state and the heartbeat dot.
 -- @tparam table s Reactor snapshot
