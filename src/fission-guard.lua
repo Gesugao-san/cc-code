@@ -37,6 +37,7 @@ local CONFIG = {
   MIN_COOLANT = 0.99,          -- SCRAM when coolant is at or below this
   MAX_HEATED_COOLANT = 0.01,   -- SCRAM when heated coolant is at or above
   MAX_WASTE = 0.01,            -- SCRAM when waste is at or above this
+  MAX_DAMAGE = 0,              -- SCRAM when damage (%) is above this
   TRIP_BURN_FACTOR = 0.5,      -- burn rate multiplier after a SCRAM
 
   KNOWN_SUPPLY = 10 * 192000,  -- mB/t from the infinite sources (10 barrels);
@@ -73,6 +74,7 @@ local CONFIG = {
 
   STATE_FILE = "fission-guard.state",
   LOG_FILE = "fission-guard.log",
+  LIMITS_FILE = "fission-guard.limits", -- trip limits changed on screen
 }
 
 local STATE_VERSION = 3 -- bump to discard calibration saved by old versions
@@ -132,6 +134,60 @@ local function writeFile(path, text)
   file.close()
   return true
 end
+
+--- Trip limits that can be changed on screen, by CONFIG key.
+-- Values are adjusted in shown units: scale turns a stored fraction
+-- into percent; min/max keep a limit from tripping always or never.
+local LIMIT_RANGES = {
+  MAX_TEMPERATURE = { step = 5, min = 100, max = 900, scale = 1 },
+  MIN_COOLANT = { step = 1, min = 0, max = 99, scale = 100 },
+  MAX_HEATED_COOLANT = { step = 1, min = 1, max = 100, scale = 100 },
+  MAX_WASTE = { step = 1, min = 1, max = 100, scale = 100 },
+  MAX_DAMAGE = { step = 1, min = 0, max = 99, scale = 1 },
+}
+
+--- Shown value of a trip limit, e.g. 99 for MIN_COOLANT = 0.99.
+-- @tparam string key CONFIG key
+-- @treturn number Value in shown units
+local function shownLimit(key)
+  local range = LIMIT_RANGES[key]
+  return math.floor(CONFIG[key] * range.scale + 0.5)
+end
+
+--- Sets a trip limit from a shown value, kept inside its range.
+-- @tparam string key CONFIG key
+-- @tparam number shown Value in shown units
+local function setLimit(key, shown)
+  local range = LIMIT_RANGES[key]
+  local clamped = math.max(range.min, math.min(range.max, shown))
+  CONFIG[key] = clamped / range.scale
+end
+
+--- Loads trip limits saved from the screen over the CONFIG defaults.
+local function loadLimits()
+  local text = readFile(CONFIG.LIMITS_FILE)
+  local data = text and textutils.unserialize(text)
+  if type(data) ~= "table" then
+    return
+  end
+
+  for key, range in pairs(LIMIT_RANGES) do
+    if type(data[key]) == "number" then
+      setLimit(key, data[key] * range.scale)
+    end
+  end
+end
+
+--- Saves current trip limits.
+local function saveLimits()
+  local data = {}
+  for key in pairs(LIMIT_RANGES) do
+    data[key] = CONFIG[key]
+  end
+  writeFile(CONFIG.LIMITS_FILE, textutils.serialize(data))
+end
+
+loadLimits()
 
 --- Loads saved calibration; data from other versions is ignored.
 -- @treturn table { samples = table, model = table|nil }
@@ -326,7 +382,7 @@ local SAFETY_RULES = {
     end,
   },
   {
-    isUnsafe = function(s) return s.damage > 0 end,
+    isUnsafe = function(s) return s.damage > CONFIG.MAX_DAMAGE end,
     describe = function(s) return string.format("damage %.1f", s.damage) end,
   },
   {
@@ -1188,7 +1244,7 @@ local function clipSegments(segments, width)
   local result, used = {}, 0
   for _, segment in ipairs(segments) do
     local text = segment[1]:sub(1, width - used)
-    table.insert(result, { text, segment[2] })
+    table.insert(result, { text, segment[2], segment[3], id = segment.id })
     used = used + #text
   end
   return result
@@ -1247,10 +1303,10 @@ local function textCell(text, color)
   return { { text, color or colors.lightGray } }
 end
 
---- Column widths of the parameter table: VAR, VALUE, TRIP.
-local PARAM_WIDTHS = { 5, 7, 10 }
+--- Column widths of the parameter table: VAR, VALUE, TRIP, ADJ.
+local PARAM_WIDTHS = { 5, 7, 9, 7 }
 local VALUE_DIGITS = 4 -- number field in VALUE, zero-padded
-local TRIP_DIGITS = 4  -- number field in TRIP, with an explicit sign
+local TRIP_DIGITS = 3  -- number field in TRIP
 local UNIT_WIDTH = 2   -- unit field: "%" or degrees C
 
 --- Number right-aligned in a field, then the unit in its own field,
@@ -1278,7 +1334,7 @@ local function valueCell(value, unit, color)
     VALUE_DIGITS)
 end
 
---- TRIP cell: comparison, signed limit and unit in fixed fields.
+--- TRIP cell: comparison, limit and unit in fixed fields.
 -- @tparam string|nil op Comparison such as "<=", nil if there is no limit
 -- @tparam number|nil limit Limit value
 -- @tparam string unit Unit text
@@ -1290,7 +1346,7 @@ local function tripCell(op, limit, unit)
   end
 
   local cell = { { string.format("%-2s ", op), colors.gray } }
-  appendSegments(cell, alignedNumber({ { string.format("%+.0f", limit),
+  appendSegments(cell, alignedNumber({ { string.format("%.0f", limit),
     colors.gray } }, unit, colors.gray, TRIP_DIGITS))
   return cell
 end
@@ -1298,52 +1354,52 @@ end
 local CELSIUS = DEGREE .. "C"
 
 --- Parameter table rows. value(s) returns the number and its color;
--- limit() returns the SCRAM limit, or nil if there is none.
+-- limitKey names the CONFIG trip limit, if the row has one.
 local PARAM_ROWS = {
   {
     name = "COOL",
     unit = "%",
     op = "<=",
+    limitKey = "MIN_COOLANT",
     value = function(s)
       return s.coolant * 100, depletionRisk(s.coolant, CONFIG.MIN_COOLANT)
     end,
-    limit = function() return CONFIG.MIN_COOLANT * 100 end,
   },
   {
     name = "HEAT",
     unit = "%",
     op = ">=",
+    limitKey = "MAX_HEATED_COOLANT",
     value = function(s)
       return s.heated * 100, highRisk(s.heated, CONFIG.MAX_HEATED_COOLANT)
     end,
-    limit = function() return CONFIG.MAX_HEATED_COOLANT * 100 end,
   },
   {
     name = "WASTE",
     unit = "%",
     op = ">=",
+    limitKey = "MAX_WASTE",
     value = function(s)
       return s.waste * 100, highRisk(s.waste, CONFIG.MAX_WASTE)
     end,
-    limit = function() return CONFIG.MAX_WASTE * 100 end,
   },
   {
     name = "T",
     unit = CELSIUS,
     op = ">=",
+    limitKey = "MAX_TEMPERATURE",
     value = function(s)
       return s.temperature, highRisk(s.temperature, CONFIG.MAX_TEMPERATURE)
     end,
-    limit = function() return CONFIG.MAX_TEMPERATURE end,
   },
   {
     name = "DMG",
     unit = "%",
     op = ">",
+    limitKey = "MAX_DAMAGE",
     value = function(s)
       return s.damage, s.damage > 0 and colors.red or colors.lime
     end,
-    limit = function() return 0 end,
   },
   {
     name = "FUEL",
@@ -1351,9 +1407,18 @@ local PARAM_ROWS = {
     value = function(s)
       return s.fuel * 100, lowRisk(s.fuel, FUEL_DISPLAY_LIMIT)
     end,
-    limit = function() return nil end,
   },
 }
+
+--- Current TRIP limit of a row in shown units.
+-- @tparam table param Parameter row definition
+-- @treturn number|nil Limit, nil if the row has none
+local function rowLimit(param)
+  if not param.limitKey then
+    return nil
+  end
+  return shownLimit(param.limitKey)
+end
 
 --- Sorts parameter rows by TRIP limit, largest first; rows without a
 -- limit go last, ties keep their order.
@@ -1362,7 +1427,7 @@ local function sortParamRows()
     param.order = i
   end
   table.sort(PARAM_ROWS, function(a, b)
-    local la, lb = a.limit(), b.limit()
+    local la, lb = rowLimit(a), rowLimit(b)
     if la == lb then
       return a.order < b.order
     end
@@ -1375,6 +1440,52 @@ end
 
 sortParamRows()
 
+--- Changes a row's trip limit by one step, saves it and re-sorts.
+-- @tparam table param Parameter row definition
+-- @tparam number direction -1 or 1
+local function adjustLimit(param, direction)
+  local key = param.limitKey
+  local before = shownLimit(key)
+  setLimit(key, before + direction * LIMIT_RANGES[key].step)
+  local after = shownLimit(key)
+  if after == before then
+    state.lastAction = "trip " .. param.name .. " is at its bound"
+    return
+  end
+
+  saveLimits()
+  sortParamRows()
+  state.lastAction = string.format("trip %s %s %d -> %d %s", param.name,
+    param.op, before, after, param.unit)
+  log(state.lastAction)
+end
+
+--- Registers "-" and "+" buttons for every row with a trip limit.
+for _, param in ipairs(PARAM_ROWS) do
+  if param.limitKey then
+    BUTTONS_BY_ID["tripDown:" .. param.name] = {
+      press = function() adjustLimit(param, -1) end,
+    }
+    BUTTONS_BY_ID["tripUp:" .. param.name] = {
+      press = function() adjustLimit(param, 1) end,
+    }
+  end
+end
+
+--- ADJ cell: "-" and "+" buttons for a row's trip limit.
+-- @tparam table param Parameter row definition
+-- @treturn table Segments; empty if the row has no limit
+local function adjustCell(param)
+  if not param.limitKey then
+    return {}
+  end
+  return {
+    { " - ", colors.white, colors.gray, id = "tripDown:" .. param.name },
+    { " " },
+    { " + ", colors.white, colors.gray, id = "tripUp:" .. param.name },
+  }
+end
+
 --- Cells of one parameter row.
 -- @tparam table param Parameter row definition
 -- @tparam table s Reactor snapshot
@@ -1384,7 +1495,8 @@ local function paramCells(param, s)
   return {
     textCell(param.name),
     valueCell(value, param.unit, color),
-    tripCell(param.op, param.limit(), param.unit),
+    tripCell(param.op, rowLimit(param), param.unit),
+    adjustCell(param),
   }
 end
 
@@ -1455,7 +1567,7 @@ local function contentRows(s)
     headerRow(s),
     line,
     tableRow(PARAM_WIDTHS, { textCell("VAR"), textCell("VALUE"),
-      textCell("TRIP") }, #PARAM_WIDTHS),
+      textCell("TRIP"), textCell("ADJ") }, #PARAM_WIDTHS),
     tableRuler(PARAM_WIDTHS),
   }
 
@@ -1505,23 +1617,33 @@ local function paint(device, kind, color)
 end
 
 --- Writes one row of colored segments, cut to the device width.
+-- A segment is { text, color, background, id = button id }; segments
+-- with an id become touch areas.
 -- @tparam table device Terminal or monitor
 -- @tparam number y Row
--- @tparam table segments Array of { text, color }
+-- @tparam table segments Array of segments
+-- @treturn table Touch areas of segments with an id
 local function row(device, y, segments)
   local width = device.getSize()
   device.setCursorPos(1, y)
   paint(device, "setBackgroundColor", colors.black)
   device.clearLine()
 
-  local used = 0
+  local used, boxes = 0, {}
   for _, segment in ipairs(segments) do
     local text = segment[1]:sub(1, width - used)
     paint(device, "setTextColor", segment[2] or colors.white)
+    paint(device, "setBackgroundColor", segment[3] or colors.black)
     device.write(text)
+    if segment.id and #text > 0 then
+      table.insert(boxes, { id = segment.id, left = used + 1,
+        right = used + #text, top = y, bottom = y })
+    end
     used = used + #text
   end
   paint(device, "setTextColor", colors.white)
+  paint(device, "setBackgroundColor", colors.black)
+  return boxes
 end
 
 --- Draws one button and returns its touch area.
@@ -1607,7 +1729,6 @@ end
 -- @tparam table snapshot Reactor snapshot
 -- @tparam number top Row right after the content
 local function drawButtons(screen, snapshot, top)
-  screen.boxes = {}
   for _, buttonRow in ipairs(BUTTON_ROWS) do
     row(screen.device, top, {})
     drawButtonRow(screen, buttonRow, snapshot, top + 1)
@@ -1619,8 +1740,9 @@ end
 -- @tparam table screen Screen
 -- @tparam table snapshot Reactor snapshot
 local function drawStatus(screen, snapshot)
+  screen.boxes = {}
   for y, segments in ipairs(contentRows(snapshot)) do
-    row(screen.device, y, segments)
+    appendSegments(screen.boxes, row(screen.device, y, segments))
   end
   drawButtons(screen, snapshot, CONTENT_ROWS + 1)
 end
