@@ -1151,16 +1151,6 @@ local function padded(value, width, color)
   return { { zeros, colors.gray }, { digits:sub(#zeros + 1), color } }
 end
 
---- Zero-padded percentage segments, e.g. dim "0" + "87 %".
--- @tparam number value Fraction, 0..1
--- @tparam number color Color of the value
--- @treturn table Segments
-local function paddedPercent(value, color)
-  local segments = padded(value * 100, 3, color)
-  table.insert(segments, { " %", color })
-  return segments
-end
-
 --- A value followed by a dim unit, e.g. "9.23" + " set".
 -- @tparam string value Value text
 -- @tparam number color Value color
@@ -1250,64 +1240,111 @@ end
 
 --- Column widths of the parameter table: PARAM, VALUE, TRIP.
 local PARAM_WIDTHS = { 5, 7, 9 }
+local VALUE_DIGITS = 4 -- number field in VALUE
+local TRIP_DIGITS = 3  -- number field in TRIP
+local UNIT_WIDTH = 2   -- unit field: "%" or degrees C
 
---- Parameter table rows: name, value cell and SCRAM limit.
+--- Number right-aligned in a field, then the unit in its own field,
+-- so digits and units line up from row to row.
+-- @tparam table number Number segments
+-- @tparam string unit Unit text
+-- @tparam number color Unit color
+-- @tparam number digits Width of the number field
+-- @treturn table Segments
+local function alignedNumber(number, unit, color, digits)
+  local cell = { { string.rep(" ", digits - segmentsLength(number)) } }
+  appendSegments(cell, number)
+  table.insert(cell, { " " .. unit
+    .. string.rep(" ", UNIT_WIDTH - #unit), color })
+  return cell
+end
+
+--- VALUE cell: zero-padded number and unit.
+-- @tparam number value Number to show
+-- @tparam number width Digits, leading zeros dimmed
+-- @tparam string unit Unit text
+-- @tparam number color Value color
+-- @treturn table Segments
+local function valueCell(value, width, unit, color)
+  return alignedNumber(padded(value, width, color), unit, color, VALUE_DIGITS)
+end
+
+--- TRIP cell: comparison, limit and unit in fixed fields.
+-- @tparam string|nil op Comparison such as "<=", nil if there is no limit
+-- @tparam number|nil limit Limit value
+-- @tparam string unit Unit text
+-- @treturn table Segments
+local function tripCell(op, limit, unit)
+  if not op then
+    return alignedNumber({ { "-", colors.gray } }, "", colors.gray,
+      TRIP_DIGITS + 3)
+  end
+
+  local cell = { { string.format("%-2s ", op), colors.gray } }
+  appendSegments(cell, alignedNumber({ { string.format("%.0f", limit),
+    colors.gray } }, unit, colors.gray, TRIP_DIGITS))
+  return cell
+end
+
+local CELSIUS = DEGREE .. "C"
+
+--- Parameter table rows: name, VALUE cell and TRIP cell.
 local PARAM_ROWS = {
   {
     name = "COOL",
     value = function(s)
-      return paddedPercent(s.coolant,
+      return valueCell(s.coolant * 100, 3, "%",
         depletionRisk(s.coolant, CONFIG.MIN_COOLANT))
     end,
     trip = function()
-      return string.format("<= %.0f %%", CONFIG.MIN_COOLANT * 100)
+      return tripCell("<=", CONFIG.MIN_COOLANT * 100, "%")
     end,
   },
   {
     name = "HEAT",
     value = function(s)
-      return paddedPercent(s.heated,
+      return valueCell(s.heated * 100, 3, "%",
         highRisk(s.heated, CONFIG.MAX_HEATED_COOLANT))
     end,
     trip = function()
-      return string.format(">= %.0f %%", CONFIG.MAX_HEATED_COOLANT * 100)
+      return tripCell(">=", CONFIG.MAX_HEATED_COOLANT * 100, "%")
     end,
   },
   {
     name = "WASTE",
     value = function(s)
-      return paddedPercent(s.waste, highRisk(s.waste, CONFIG.MAX_WASTE))
+      return valueCell(s.waste * 100, 3, "%",
+        highRisk(s.waste, CONFIG.MAX_WASTE))
     end,
     trip = function()
-      return string.format(">= %.0f %%", CONFIG.MAX_WASTE * 100)
+      return tripCell(">=", CONFIG.MAX_WASTE * 100, "%")
     end,
   },
   {
     name = "TMP",
     value = function(s)
-      local color = highRisk(s.temperature, CONFIG.MAX_TEMPERATURE)
-      local segments = padded(s.temperature, 4, color)
-      table.insert(segments, { " " .. DEGREE .. "C", color })
-      return segments
+      return valueCell(s.temperature, 4, CELSIUS,
+        highRisk(s.temperature, CONFIG.MAX_TEMPERATURE))
     end,
     trip = function()
-      return string.format(">= %.0f %sC", CONFIG.MAX_TEMPERATURE, DEGREE)
+      return tripCell(">=", CONFIG.MAX_TEMPERATURE, CELSIUS)
     end,
   },
   {
     name = "DMG",
     value = function(s)
-      return paddedPercent(s.damage / 100,
+      return valueCell(s.damage, 3, "%",
         s.damage > 0 and colors.red or colors.lime)
     end,
-    trip = function() return ">0" end,
+    trip = function() return tripCell(">", 0, "%") end,
   },
   {
     name = "FUEL",
     value = function(s)
-      return paddedPercent(s.fuel, lowRisk(s.fuel, FUEL_DISPLAY_LIMIT))
+      return valueCell(s.fuel * 100, 3, "%",
+        lowRisk(s.fuel, FUEL_DISPLAY_LIMIT))
     end,
-    trip = function() return "-" end,
+    trip = function() return tripCell(nil) end,
   },
 }
 
@@ -1366,7 +1403,7 @@ local function contentRows(s)
 
   for _, param in ipairs(PARAM_ROWS) do
     table.insert(rows, tableRow(PARAM_WIDTHS, { textCell(param.name),
-      param.value(s), textCell(param.trip(), colors.gray) }))
+      param.value(s), param.trip() }))
   end
 
   local lastWidth = CONTROL_WIDTHS[2] + CONTROL_WIDTHS[3]
