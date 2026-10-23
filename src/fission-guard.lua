@@ -1247,10 +1247,10 @@ local function textCell(text, color)
   return { { text, color or colors.lightGray } }
 end
 
---- Column widths of the parameter table: PARAM, VALUE, TRIP.
-local PARAM_WIDTHS = { 5, 7, 9 }
-local VALUE_DIGITS = 4 -- number field in VALUE
-local TRIP_DIGITS = 3  -- number field in TRIP
+--- Column widths of the parameter table: VAR, VALUE, TRIP.
+local PARAM_WIDTHS = { 5, 7, 10 }
+local VALUE_DIGITS = 4 -- number field in VALUE, zero-padded
+local TRIP_DIGITS = 4  -- number field in TRIP, with an explicit sign
 local UNIT_WIDTH = 2   -- unit field: "%" or degrees C
 
 --- Number right-aligned in a field, then the unit in its own field,
@@ -1268,17 +1268,17 @@ local function alignedNumber(number, unit, color, digits)
   return cell
 end
 
---- VALUE cell: zero-padded number and unit.
+--- VALUE cell: number zero-padded to VALUE_DIGITS, then the unit.
 -- @tparam number value Number to show
--- @tparam number width Digits, leading zeros dimmed
 -- @tparam string unit Unit text
 -- @tparam number color Value color
 -- @treturn table Segments
-local function valueCell(value, width, unit, color)
-  return alignedNumber(padded(value, width, color), unit, color, VALUE_DIGITS)
+local function valueCell(value, unit, color)
+  return alignedNumber(padded(value, VALUE_DIGITS, color), unit, color,
+    VALUE_DIGITS)
 end
 
---- TRIP cell: comparison, limit and unit in fixed fields.
+--- TRIP cell: comparison, signed limit and unit in fixed fields.
 -- @tparam string|nil op Comparison such as "<=", nil if there is no limit
 -- @tparam number|nil limit Limit value
 -- @tparam string unit Unit text
@@ -1290,72 +1290,103 @@ local function tripCell(op, limit, unit)
   end
 
   local cell = { { string.format("%-2s ", op), colors.gray } }
-  appendSegments(cell, alignedNumber({ { string.format("%.0f", limit),
+  appendSegments(cell, alignedNumber({ { string.format("%+.0f", limit),
     colors.gray } }, unit, colors.gray, TRIP_DIGITS))
   return cell
 end
 
 local CELSIUS = DEGREE .. "C"
 
---- Parameter table rows: name, VALUE cell and TRIP cell.
+--- Parameter table rows. value(s) returns the number and its color;
+-- limit() returns the SCRAM limit, or nil if there is none.
 local PARAM_ROWS = {
   {
     name = "COOL",
+    unit = "%",
+    op = "<=",
     value = function(s)
-      return valueCell(s.coolant * 100, 3, "%",
-        depletionRisk(s.coolant, CONFIG.MIN_COOLANT))
+      return s.coolant * 100, depletionRisk(s.coolant, CONFIG.MIN_COOLANT)
     end,
-    trip = function()
-      return tripCell("<=", CONFIG.MIN_COOLANT * 100, "%")
-    end,
+    limit = function() return CONFIG.MIN_COOLANT * 100 end,
   },
   {
     name = "HEAT",
+    unit = "%",
+    op = ">=",
     value = function(s)
-      return valueCell(s.heated * 100, 3, "%",
-        highRisk(s.heated, CONFIG.MAX_HEATED_COOLANT))
+      return s.heated * 100, highRisk(s.heated, CONFIG.MAX_HEATED_COOLANT)
     end,
-    trip = function()
-      return tripCell(">=", CONFIG.MAX_HEATED_COOLANT * 100, "%")
-    end,
+    limit = function() return CONFIG.MAX_HEATED_COOLANT * 100 end,
   },
   {
     name = "WASTE",
+    unit = "%",
+    op = ">=",
     value = function(s)
-      return valueCell(s.waste * 100, 3, "%",
-        highRisk(s.waste, CONFIG.MAX_WASTE))
+      return s.waste * 100, highRisk(s.waste, CONFIG.MAX_WASTE)
     end,
-    trip = function()
-      return tripCell(">=", CONFIG.MAX_WASTE * 100, "%")
-    end,
+    limit = function() return CONFIG.MAX_WASTE * 100 end,
   },
   {
-    name = "TMP",
+    name = "T",
+    unit = CELSIUS,
+    op = ">=",
     value = function(s)
-      return valueCell(s.temperature, 4, CELSIUS,
-        highRisk(s.temperature, CONFIG.MAX_TEMPERATURE))
+      return s.temperature, highRisk(s.temperature, CONFIG.MAX_TEMPERATURE)
     end,
-    trip = function()
-      return tripCell(">=", CONFIG.MAX_TEMPERATURE, CELSIUS)
-    end,
+    limit = function() return CONFIG.MAX_TEMPERATURE end,
   },
   {
     name = "DMG",
+    unit = "%",
+    op = ">",
     value = function(s)
-      return valueCell(s.damage, 3, "%",
-        s.damage > 0 and colors.red or colors.lime)
+      return s.damage, s.damage > 0 and colors.red or colors.lime
     end,
-    trip = function() return tripCell(">", 0, "%") end,
+    limit = function() return 0 end,
   },
   {
     name = "FUEL",
+    unit = "%",
     value = function(s)
-      return valueCell(s.fuel * 100, 3, "%",
-        lowRisk(s.fuel, FUEL_DISPLAY_LIMIT))
+      return s.fuel * 100, lowRisk(s.fuel, FUEL_DISPLAY_LIMIT)
     end,
-    trip = function() return tripCell(nil) end,
+    limit = function() return nil end,
   },
 }
+
+--- Sorts parameter rows by TRIP limit, largest first; rows without a
+-- limit go last, ties keep their order.
+local function sortParamRows()
+  for i, param in ipairs(PARAM_ROWS) do
+    param.order = i
+  end
+  table.sort(PARAM_ROWS, function(a, b)
+    local la, lb = a.limit(), b.limit()
+    if la == lb then
+      return a.order < b.order
+    end
+    if la == nil or lb == nil then
+      return lb == nil
+    end
+    return la > lb
+  end)
+end
+
+sortParamRows()
+
+--- Cells of one parameter row.
+-- @tparam table param Parameter row definition
+-- @tparam table s Reactor snapshot
+-- @treturn table Cells
+local function paramCells(param, s)
+  local value, color = param.value(s)
+  return {
+    textCell(param.name),
+    valueCell(value, param.unit, color),
+    tripCell(param.op, param.limit(), param.unit),
+  }
+end
 
 --- Column widths of the control table: name and three values.
 local CONTROL_WIDTHS = { 5, 11, 11, 11 }
@@ -1423,14 +1454,13 @@ local function contentRows(s)
   local rows = {
     headerRow(s),
     line,
-    tableRow(PARAM_WIDTHS, { textCell("PARAM"), textCell("VALUE"),
-      textCell("TRIP") }),
+    tableRow(PARAM_WIDTHS, { textCell("VAR"), textCell("VALUE"),
+      textCell("TRIP") }, #PARAM_WIDTHS),
     tableRuler(PARAM_WIDTHS),
   }
 
   for _, param in ipairs(PARAM_ROWS) do
-    table.insert(rows, tableRow(PARAM_WIDTHS, { textCell(param.name),
-      param.value(s), param.trip() }))
+    table.insert(rows, tableRow(PARAM_WIDTHS, paramCells(param, s)))
   end
 
   local lastWidth = CONTROL_WIDTHS[2] + CONTROL_WIDTHS[3]
